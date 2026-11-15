@@ -1,5 +1,12 @@
 # binscope
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-64%20passing-brightgreen.svg)](#tests)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-informational.svg)](#install)
+[![Formats: ELF | PE](https://img.shields.io/badge/formats-ELF%20%7C%20PE-blueviolet.svg)](#how-it-works)
+[![Use case: Malware / CTF](https://img.shields.io/badge/use%20case-malware%20%7C%20CTF-red.svg)](#why-binscope)
+
 Rapid triage of **Linux ELF** and **Windows PE** binaries for malware analysts
 and CTF players (Reverse / PWN). In one command it answers two questions:
 
@@ -13,6 +20,23 @@ report. The format is detected automatically from the magic bytes: ELF files go
 through the strace/ltrace engine, PE files (`.exe`/`.dll`, PE32 and PE32+)
 through a `pefile` + Speakeasy emulation backend. Reports can be exported as
 JSON (`--json`) or Markdown (`--md`).
+
+![binscope analyze ./sample_stdin_file](docs/demo.svg)
+
+*Real output of `binscope analyze ./sample_stdin_file` - the stdin password, the
+file it writes and the TCP endpoint it contacts are all surfaced in one pass.*
+
+## Why binscope
+
+* **One command, two answers.** Expected inputs *and* real behaviour, not a raw
+  syscall dump.
+* **It actually runs the sample.** Multi-pass strace/ltrace stimulation (ELF)
+  and safe Speakeasy emulation (PE) - the PE is never executed on the host.
+* **Feedback loop.** Findings from one pass feed the next: a `strcmp` literal
+  becomes the next argv/stdin, a `getenv` name becomes the next env var, a
+  missing path can be stubbed with `--auto-stub` to reveal the next stage.
+* **Analyst-first output.** De-noised (no `ld.so`/`.so` spam), colourised
+  terminal report, plus JSON and Markdown export for notes and reports.
 
 ## Install
 
@@ -156,8 +180,9 @@ commands, file reads/writes, registry access and network endpoints.
 ## Tests
 
 Integration tests compile real C programs and run the full analysis on them - no
-mocks. The suite has 63 tests covering both backends plus the CLI surface
-(`doctor`, the direct-file shortcut, `--explain`, next steps, non-`+x` handling).
+mocks. The suite has 64 tests covering both backends plus the CLI surface
+(`doctor`, the direct-file shortcut, `--explain`, next steps, non-`+x` handling,
+relative-path resolution).
 
 **ELF** (`tests/fixtures/*.c`, built with `gcc`):
 
@@ -182,6 +207,14 @@ pytest -v
 ```
 
 PE tests are skipped automatically when `mingw-w64` or `speakeasy` is absent.
+
+The terminal screenshot at the top (`docs/demo.svg`) is generated from a real
+run - regenerate it after a change with:
+
+```bash
+python docs/make_demo.py                      # -> docs/demo.svg
+python docs/make_demo.py tests/fixtures/sample_env_cmd out.svg
+```
 
 ## License
 
