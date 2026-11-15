@@ -11,9 +11,13 @@ and CTF players (Reverse / PWN). In one command it answers two questions:
 Instead of reading thousands of `strace` lines, you get a short, structured
 report. The format is detected automatically from the magic bytes: ELF files go
 through the strace/ltrace engine, PE files (`.exe`/`.dll`, PE32 and PE32+)
-through a `pefile` + Speakeasy emulation backend.
+through a `pefile` + Speakeasy emulation backend. Reports can be exported as
+JSON (`--json`) or Markdown (`--md`).
 
 ## Install
+
+Requires Python 3.9+. `pefile` (PE parsing) and `rich` (terminal rendering) are
+installed automatically.
 
 ```bash
 pip install -e .
@@ -36,13 +40,23 @@ Python 3.12+.
 ## Usage
 
 ```bash
+binscope ./target_binary                       # shortcut: 'analyze' is implied
 binscope analyze ./target_binary
 binscope analyze ./target_binary --json report.json --md report.md
-binscope analyze ./target_binary --auto-stub   # create fake files for missing paths (ELF)
+binscope analyze ./target_binary --explain      # add a beginner-friendly glossary
+binscope analyze ./target_binary --auto-stub    # create fake files for missing paths (ELF)
 binscope analyze ./target_binary --timeout 5    # per-pass timeout (s)
+binscope doctor                                 # check installed tools / optional deps
 ```
 
-The terminal report has five sections:
+Passing a file directly (`binscope ./target`) is a shortcut for `analyze`. A
+non-executable file is handled too: binscope traces it via a temporary
+executable copy and notes the missing `+x`. `binscope doctor` prints which
+system tools and optional dependencies are present, with the exact command to
+install any that are missing.
+
+The terminal report has five sections (plus a "Next steps" footer, and an
+optional sixth with `--explain`):
 
 1. **Identity** - arch, type, stripped/subsystem, size, SHA256, protections.
    * ELF: arch, ELF type, interpreter, stripped, checksec (PIE / NX / Canary /
@@ -63,12 +77,33 @@ The terminal report has five sections:
 4. **Static capabilities** - imported dynamic symbols (minus C-runtime plumbing),
    a de-noised strings digest (URLs, paths, `printf` formats, messages), plus
    `capa`/`floss` summaries when installed.
-   * PE: imported DLLs, APIs grouped by family (Process, File, Registry,
-     Network, Anti-Debug, Crypto, ...), matched by exact API name so
-     `SendMessageA` stays under GUI and `GetSystemMetrics` is not read as a
-     process API; notable ASCII strings (paths, flags, `printf` formats) are
-     listed next to the notable UTF-16LE ones.
-5. **Analyst synthesis** - 3-5 plain-language bullet points.
+   * PE: imported DLLs, APIs grouped by family (Process, Process-Injection,
+     File, Registry, Network, GUI, Anti-Debug, Crypto, Service, Environment),
+     matched by exact API name so `SendMessageA` stays under GUI and
+     `GetSystemMetrics` is not read as a process API; notable ASCII strings
+     (paths, flags, `printf` formats) are listed next to the notable UTF-16LE
+     ones.
+5. **Analyst synthesis** - 3-5 plain-language bullet points, followed by a
+   **Next steps** footer with concrete follow-up actions for this sample.
+6. **Beginner guide** (`--explain` only) - a glossary that decodes the
+   technical terms (PIE, RELRO, strace, `getenv`, ...) used in the report.
+
+### Example
+
+```
+$ binscope analyze ./sample_env_cmd
+  1. Identity      ELF 64-bit, PIE, not stripped, 17584 bytes, sha256 414fb1e2...
+  Protections      PIE: Yes  NX: Yes  Canary: No  RELRO: Partial  FORTIFY: No
+  2. Stimuli       argv '--go'; env RUN_MODE; string compare '--go'
+                   output trigger: argv --go + env RUN_MODE=1 -> stdout: payload_executed
+  3. Behaviour     execve /bin/echo payload_executed; stdout: payload_executed
+  4. Capabilities  imports: getenv, puts, strcmp, system
+                   notable strings: RUN_MODE, /bin/echo payload_executed, ...
+  5. Synthesis     - Waits for / reacts to: argv '--go'; env RUN_MODE.
+                   - Observed actions: spawns /bin/echo payload_executed.
+  Next steps       -> test those exact arguments/stdin values to verify the path
+                   -> active process/file/network behaviour: sandbox only
+```
 
 ## How it works
 
@@ -110,7 +145,8 @@ not performed. The engine runs a handful of passes:
 * a baseline pass (no arguments),
 * one pass per candidate argv token (`--go`, `-h`, `--help`, `1`, `admin`,
   `test`, `flag`, `secret`),
-* one pass per probed environment variable (`RUN_MODE=1`, `DEBUG=1`, ...).
+* one pass per probed environment variable (`RUN_MODE=1`, `DEBUG=1`,
+  `MODE=1`, `TEST=1`).
 
 Each pass records the sequence of API calls and their arguments. A pass that
 unlocks **new APIs** is reported as a stimulus (e.g. `--go -> new APIs: WinExec`).
@@ -120,7 +156,8 @@ commands, file reads/writes, registry access and network endpoints.
 ## Tests
 
 Integration tests compile real C programs and run the full analysis on them - no
-mocks.
+mocks. The suite has 63 tests covering both backends plus the CLI surface
+(`doctor`, the direct-file shortcut, `--explain`, next steps, non-`+x` handling).
 
 **ELF** (`tests/fixtures/*.c`, built with `gcc`):
 
