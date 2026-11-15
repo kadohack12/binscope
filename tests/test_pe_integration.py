@@ -35,6 +35,11 @@ def dll_result(pe_bins):
     return analyze(pe_bins["sample_pe_dll"], timeout=5.0)
 
 
+@pytest.fixture(scope="module")
+def gui_result(pe_bins):
+    return analyze(pe_bins["sample_pe_gui"], timeout=5.0)
+
+
 # --------------------------------------------------------------------------- #
 # Format detection
 # --------------------------------------------------------------------------- #
@@ -176,6 +181,40 @@ def test_api_categories(env_result):
 def test_interesting_strings(env_result):
     joined = " ".join(env_result.capabilities.interesting_strings)
     assert "payload_executed" in joined or "access granted" in joined
+
+
+def test_gui_subsystem(gui_result):
+    assert gui_result.identity.subsystem == "GUI"
+    assert gui_result.identity.format == "PE"
+
+
+def test_gui_apis_not_miscategorized(gui_result):
+    """SendMessageA is USER32 (GUI) and GetSystemMetrics is not a process API."""
+    cats = gui_result.capabilities.api_categories
+    gui_apis = " ".join(cats.get("GUI", []))
+    assert "SendMessageA" in gui_apis
+    assert "GetSystemMetrics" in gui_apis
+    # Regression: loose substring matching filed these under the wrong family.
+    assert "SendMessageA" not in " ".join(cats.get("Network", []))
+    assert "GetSystemMetrics" not in " ".join(cats.get("Process", []))
+    assert "MessageBoxA" in gui_apis
+
+
+def test_notable_strings_include_ascii_format(gui_result):
+    """The ASCII flag-like format string must appear in the notable ASCII list."""
+    ascii_notable = gui_result.capabilities.notable_ascii_strings
+    assert any("FCSC{" in s for s in ascii_notable)
+    # ...and the UTF-16 messages must still be reported on their own side.
+    unicode_strings = gui_result.capabilities.unicode_strings
+    assert any("Catch me if you can" in s for s in unicode_strings)
+
+
+def test_notable_strings_render_both_encodings(gui_result):
+    md = to_markdown(gui_result)
+    assert "notable strings (ASCII)" in md
+    assert "FCSC{" in md
+    assert "notable strings (UTF-16)" in md
+    assert "Catch me if you can" in md
 
 
 # --------------------------------------------------------------------------- #

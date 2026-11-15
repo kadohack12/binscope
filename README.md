@@ -28,7 +28,10 @@ pip install flare-floss   # 'floss'
 
 `pefile` is a hard dependency; `speakeasy-emulator` is optional and only needed
 for the dynamic PE section. If it is missing, binscope still produces the full
-static PE report and warns that emulation was skipped.
+static PE report and warns that emulation was skipped. The `[pe]` extra also
+pins `setuptools<81`: Speakeasy's `unicorn` needs `distutils.sysconfig` and
+`pkg_resources` at runtime, and both only ship with older setuptools on
+Python 3.12+.
 
 ## Usage
 
@@ -61,7 +64,10 @@ The terminal report has five sections:
    a de-noised strings digest (URLs, paths, `printf` formats, messages), plus
    `capa`/`floss` summaries when installed.
    * PE: imported DLLs, APIs grouped by family (Process, File, Registry,
-     Network, Anti-Debug, Crypto, ...), and ASCII + UTF-16LE strings.
+     Network, Anti-Debug, Crypto, ...), matched by exact API name so
+     `SendMessageA` stays under GUI and `GetSystemMetrics` is not read as a
+     process API; notable ASCII strings (paths, flags, `printf` formats) are
+     listed next to the notable UTF-16LE ones.
 5. **Analyst synthesis** - 3-5 plain-language bullet points.
 
 ## How it works
@@ -128,6 +134,9 @@ mocks.
 * `sample_pe_env_cmd` - `RUN_MODE=1` + `--go` -> `WinExec` a payload
 * `sample_pe_file_net` - `CreateFile` + `RegOpenKeyEx` + Winsock `connect`
 * `sample_pe_check_file` - `GetFileAttributesA` gate -> stage-two file write
+* `sample_pe_gui` - GUI subsystem: `USER32` APIs (`SendMessageA`,
+  `GetSystemMetrics`) + an ASCII flag-like format string (`FCSC{%.32s}`)
+  alongside UTF-16 messages (`Catch me if you can`, `Gone!`)
 
 ```bash
 sudo apt-get install -y gcc mingw-w64    # build the fixtures

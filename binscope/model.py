@@ -94,6 +94,7 @@ class Capabilities:
     dlls: List[str] = field(default_factory=list)
     api_categories: Dict[str, List[str]] = field(default_factory=dict)
     unicode_strings: List[str] = field(default_factory=list)
+    notable_ascii_strings: List[str] = field(default_factory=list)
 
 
 @dataclass

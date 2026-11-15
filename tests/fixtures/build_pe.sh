@@ -15,5 +15,8 @@ for src in sample_pe_env_cmd.c sample_pe_file_net.c sample_pe_check_file.c; do
     $CC -O0 -o "$out" "$src" -lws2_32
     echo "built $out"
 done
+# GUI-subsystem sample (SendMessageA/GetSystemMetrics + ASCII flag + UTF-16 text).
+$CC -O0 -mwindows -o sample_pe_gui.exe sample_pe_gui.c
+echo "built sample_pe_gui.exe"
 $CC -O0 -shared -o sample_pe_dll.dll sample_pe_dll.c
 echo "built sample_pe_dll.dll"

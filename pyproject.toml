@@ -20,7 +20,10 @@ dependencies = ["rich>=12.0", "pefile>=2023.2.7"]
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
-pe = ["speakeasy-emulator>=1.5"]
+# speakeasy (via unicorn==1.0.2) needs distutils.sysconfig and pkg_resources at
+# runtime. distutils only exists through setuptools on Python 3.12+, and
+# pkg_resources was removed from setuptools 81+, hence the upper bound.
+pe = ["speakeasy-emulator>=1.5", "setuptools>=61.0,<81"]
 
 [project.scripts]
 binscope = "binscope.cli:main"

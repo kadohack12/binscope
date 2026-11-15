@@ -11,6 +11,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
 SAMPLES = ["sample_env_cmd", "sample_stdin_file", "sample_check_file", "sample_num_arg"]
 PE_SAMPLES = ["sample_pe_env_cmd", "sample_pe_file_net", "sample_pe_check_file"]
+# PE samples that need the GUI subsystem (-mwindows).
+PE_GUI_SAMPLES = ["sample_pe_gui"]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -43,6 +45,13 @@ def pe_bins():
         out = os.path.join(FIXTURES, name + ".exe")
         if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(src):
             subprocess.run([cc, "-O0", "-o", out, src, "-lws2_32"], check=True)
+        built[name] = out
+    # GUI-subsystem sample needs -mwindows to set the GUI subsystem bit.
+    for name in PE_GUI_SAMPLES:
+        src = os.path.join(FIXTURES, name + ".c")
+        out = os.path.join(FIXTURES, name + ".exe")
+        if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(src):
+            subprocess.run([cc, "-O0", "-mwindows", "-o", out, src], check=True)
         built[name] = out
     # The DLL fixture needs the -shared flag.
     src = os.path.join(FIXTURES, "sample_pe_dll.c")

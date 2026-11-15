@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .model import Behavior, Capabilities, Identity, Protections, RunResult, Stimuli
 from .static import (
+    _FORMAT_RE,
     _GCC_NOISE_RE,
     _INTERESTING_RE,
     _MESSAGE_RE,
@@ -36,8 +37,16 @@ except Exception:  # pragma: no cover
 
 try:  # pragma: no cover
     import speakeasy
-except Exception:  # pragma: no cover
+    _SPEAKEASY_IMPORT_ERROR: Optional[Exception] = None
+except ModuleNotFoundError as _speakeasy_exc:  # pragma: no cover
+    # Genuinely not installed: the module (or a required dependency) is absent.
     speakeasy = None
+    _SPEAKEASY_IMPORT_ERROR = _speakeasy_exc
+except Exception as _speakeasy_exc:  # pragma: no cover
+    # Installed but broken (e.g. missing distutils/setuptools on Python 3.12+).
+    # Keep the real exception so the report explains what actually failed.
+    speakeasy = None
+    _SPEAKEASY_IMPORT_ERROR = _speakeasy_exc
 
 
 # --------------------------------------------------------------------------- #
@@ -70,76 +79,159 @@ _SUBSYSTEM = {
     10: "EFI Application",
 }
 
-# API name -> category. Matched case-insensitively, longest prefix wins.
+# API name -> category, matched on the *exact* API name (case-insensitive).
+# A substring match is deliberately avoided: "send" would otherwise file
+# SendMessageA under Network and "system" would file GetSystemMetrics under
+# Process, even though both are USER32 GUI calls. Names are stored without the
+# A/W suffix only when the API has a single spelling (e.g. "socket").
 _API_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "Process": (
-        "createprocess", "winexec", "shellexecute", "system", "createthread",
-        "openprocess", "terminateprocess", "resumethread", "createremotethread",
-        "setthreadcontext", "writeprocessmemory", "virtualalloc",
+        "CreateProcessA", "CreateProcessW", "CreateProcessAsUserA",
+        "CreateProcessAsUserW", "CreateProcessWithLogonW", "WinExec",
+        "ShellExecuteA", "ShellExecuteW", "ShellExecuteExA", "ShellExecuteExW",
+        "system", "CreateThread", "OpenProcess", "TerminateProcess",
+        "ResumeThread", "CreateRemoteThread", "ExitProcess", "ExitThread",
     ),
     "File": (
-        "createfile", "readfile", "writefile", "deletefile", "copyfile",
-        "movefile", "findfirstfile", "findnextfile", "gettemppath",
-        "getmodulefilename", "getsystemdirectory", "getwindowsdirectory",
-        "setfileattributes", "createdirectory", "fopen", "fwrite", "fread",
-        "fgets", "remove", "unlink",
+        "CreateFileA", "CreateFileW", "ReadFile", "WriteFile", "DeleteFileA",
+        "DeleteFileW", "CopyFileA", "CopyFileW", "MoveFileA", "MoveFileW",
+        "FindFirstFileA", "FindFirstFileW", "FindNextFileA", "FindNextFileW",
+        "GetTempPathA", "GetTempPathW", "GetModuleFileNameA", "GetModuleFileNameW",
+        "GetSystemDirectoryA", "GetSystemDirectoryW", "GetWindowsDirectoryA",
+        "GetWindowsDirectoryW", "SetFileAttributesA", "SetFileAttributesW",
+        "GetFileAttributesA", "GetFileAttributesW", "CreateDirectoryA",
+        "CreateDirectoryW", "GetFileSize", "SetFilePointer", "FlushFileBuffers",
+        "fopen", "fwrite", "fread", "fgets", "fputs", "remove", "unlink",
     ),
     "Registry": (
-        "regopenkey", "regcreatekey", "regsetvalue", "regqueryvalue",
-        "regdeletekey", "regdeletevalue", "reggetvalue", "regenumkey",
-        "regclosekey",
+        "RegOpenKeyExA", "RegOpenKeyExW", "RegCreateKeyExA", "RegCreateKeyExW",
+        "RegSetValueExA", "RegSetValueExW", "RegQueryValueExA", "RegQueryValueExW",
+        "RegDeleteKeyA", "RegDeleteKeyW", "RegDeleteValueA", "RegDeleteValueW",
+        "RegGetValueA", "RegGetValueW", "RegEnumKeyExA", "RegEnumKeyExW",
+        "RegEnumValueA", "RegEnumValueW", "RegCloseKey",
     ),
     "Network": (
-        "socket", "connect", "bind", "listen", "accept", "send", "recv",
-        "wsastartup", "internetopen", "internetconnect", "httpopenrequest",
-        "httpsendrequest", "urldownloadtofile", "gethostbyname", "inet_addr",
-        "htons", "winhttp", "wsaconnect", "getaddrinfo", "closesocket",
+        "socket", "connect", "bind", "listen", "accept", "send", "sendto",
+        "recv", "recvfrom", "closesocket", "WSAStartup", "WSACleanup",
+        "WSAGetLastError", "WSASocketA", "WSASocketW", "WSAConnect",
+        "InternetOpenA", "InternetOpenW", "InternetConnectA", "InternetConnectW",
+        "HttpOpenRequestA", "HttpOpenRequestW", "HttpSendRequestA",
+        "HttpSendRequestW", "URLDownloadToFileA", "URLDownloadToFileW",
+        "gethostbyname", "getaddrinfo", "inet_addr", "htons", "ntohs",
+        "WinHttpOpen", "WinHttpConnect", "WinHttpSendRequest",
     ),
     "Anti-Debug": (
-        "isdebuggerpresent", "checkremotedebuggerpresent",
-        "ntqueryinformationprocess", "outputdebugstring", "gettickcount",
-        "queryperformancecounter", "ntglobalflag", "createtoolhelp32snapshot",
-        "gettickcount64",
+        "IsDebuggerPresent", "CheckRemoteDebuggerPresent",
+        "NtQueryInformationProcess", "OutputDebugStringA", "OutputDebugStringW",
+        "GetTickCount", "GetTickCount64", "QueryPerformanceCounter",
+        "NtGlobalFlag", "CreateToolhelp32Snapshot", "IsProcessorFeaturePresent",
+        "NtSetInformationThread", "SetUnhandledExceptionFilter",
     ),
     "GUI": (
-        "messagebox", "createwindowex", "getwindowtext", "setwindowtext",
-        "dialogbox", "getdlgitemtext", "getforegroundwindow", "findwindow",
+        "MessageBoxA", "MessageBoxW", "MessageBoxExA", "MessageBoxExW",
+        "CreateWindowExA", "CreateWindowExW", "GetWindowTextA", "GetWindowTextW",
+        "SetWindowTextA", "SetWindowTextW", "DialogBoxParamA", "DialogBoxParamW",
+        "GetDlgItemTextA", "GetDlgItemTextW", "GetForegroundWindow",
+        "FindWindowA", "FindWindowW", "SendMessageA", "SendMessageW",
+        "PostMessageA", "PostMessageW", "GetSystemMetrics", "GetDesktopWindow",
+        "SetWindowLongA", "SetWindowLongW", "GetDC", "ReleaseDC", "ShowWindow",
+        "UpdateWindow", "DefWindowProcA", "DefWindowProcW", "RegisterClassA",
+        "RegisterClassW", "RegisterWindowMessageA", "RegisterWindowMessageW",
+        "LoadCursorA", "LoadCursorW", "LoadIconA", "LoadIconW", "GetClientRect",
+        "GetWindowRect", "InvalidateRect", "BeginPaint", "EndPaint",
+        "TranslateMessage", "DispatchMessageA", "DispatchMessageW",
+        "GetMessageA", "GetMessageW", "PeekMessageA", "PeekMessageW",
     ),
-    "Crypto": ("crypt", "bcrypt", "ncrypt"),
-    "Service": ("openscmanager", "createservice", "startservice", "controlservice"),
+    "Crypto": (
+        "CryptAcquireContextA", "CryptAcquireContextW", "CryptEncrypt",
+        "CryptDecrypt", "CryptGenRandom", "CryptCreateHash", "CryptHashData",
+        "CryptDeriveKey", "CryptImportKey", "CryptExportKey",
+        "BCryptGenRandom", "BCryptEncrypt", "BCryptDecrypt",
+        "BCryptOpenAlgorithmProvider", "NCryptOpenStorageProvider",
+    ),
+    "Service": (
+        "OpenSCManagerA", "OpenSCManagerW", "CreateServiceA", "CreateServiceW",
+        "StartServiceA", "StartServiceW", "ControlService", "OpenServiceA",
+        "OpenServiceW", "ChangeServiceConfigA", "ChangeServiceConfigW",
+    ),
     "Environment": (
-        "getenvironmentvariable", "getcommandline", "getcomputername",
-        "getusername", "getsysteminfo", "expandenvironmentstrings",
+        "GetEnvironmentVariableA", "GetEnvironmentVariableW", "GetCommandLineA",
+        "GetCommandLineW", "GetComputerNameA", "GetComputerNameW",
+        "GetUserNameA", "GetUserNameW", "GetSystemInfo", "GetVersionExA",
+        "GetVersionExW", "ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW",
+        "SetEnvironmentVariableA", "SetEnvironmentVariableW",
     ),
     "Process-Injection": (
-        "virtualprotect", "createtoolhelp32snapshot", "module32first",
-        "loadlibrary", "getprocaddress", "queueuserapc", "setwindowshookex",
+        "VirtualProtect", "VirtualProtectEx", "VirtualAllocEx",
+        "WriteProcessMemory", "QueueUserAPC", "LoadLibraryA", "LoadLibraryW",
+        "GetProcAddress", "SetWindowsHookExA", "SetWindowsHookExW",
+        "NtWriteVirtualMemory", "NtMapViewOfSection", "Module32First",
+        "Module32Next",
     ),
 }
 
+# Reverse index (lowercased API name -> category). First category wins, so a
+# name listed twice is filed under its most specific family.
+_API_NAME_INDEX: Dict[str, str] = {}
+for _cat, _names in _API_CATEGORIES.items():
+    for _n in _names:
+        _API_NAME_INDEX.setdefault(_n.lower(), _cat)
+
 # APIs that indicate the binary *reads* something from its environment/input.
-_INPUT_APIS = (
-    "getcommandline", "getenvironmentvariable", "lstrcmp", "getwindowtext",
-    "isdebuggerpresent", "strcmp", "strncmp", "memcmp", "strstr", "strchr",
-    "regqueryvalue", "reggetvalue", "regopenkey", "getdlgitemtext",
-    "getmodulefilename", "gettemppath",
-)
+_INPUT_APIS = frozenset({
+    "getcommandlinea", "getcommandlinew", "getenvironmentvariablea",
+    "getenvironmentvariablew", "lstrcmpa", "lstrcmpw", "lstrcmpia", "lstrcmpiw",
+    "getwindowtexta", "getwindowtextw", "isdebuggerpresent", "strcmp",
+    "strncmp", "memcmp", "strstr", "strchr", "regqueryvalueexa",
+    "regqueryvalueexw", "reggetvaluea", "reggetvaluew", "regopenkeyexa",
+    "regopenkeyexw", "getdlgitemtexta", "getdlgitemtextw", "getmodulefilenamea",
+    "getmodulefilenamew", "gettemppatha", "gettemppathw",
+})
 
 # APIs whose string arguments reveal intent (message boxes, console writes).
-_MESSAGE_APIS = (
-    "messagebox", "writeconsole", "outputdebugstring", "putchar", "puts",
-    "printf", "fputs",
-)
+_MESSAGE_APIS = frozenset({
+    "messageboxa", "messageboxw", "messageboxexa", "messageboxexw",
+    "writeconsolea", "writeconsolew", "outputdebugstringa", "outputdebugstringw",
+    "putchar", "puts", "printf", "fputs", "fwrite",
+})
 
 # APIs that spawn a child process.
-_EXEC_APIS = ("createprocess", "winexec", "shellexecute", "system")
+_EXEC_APIS = frozenset({
+    "createprocessa", "createprocessw", "winexec", "shellexecutea",
+    "shellexecutew", "shellexecuteexa", "shellexecuteexw", "system",
+})
+
+# APIs that open a file handle, where the path argument is worth reporting.
+_FILE_APIS = frozenset({
+    "createfilea", "createfilew", "readfile", "writefile", "deletefilea",
+    "deletefilew", "copyfilea", "copyfilew", "movefilea", "movefilew",
+    "findfirstfilea", "findfirstfilew", "createfile2", "openfile",
+    "fopen", "open",
+})
+
+# Registry APIs that read vs write, used to label the access direction.
+_REG_READ_APIS = frozenset({
+    "regopenkeyexa", "regopenkeyexw", "regopenkeya", "regopenkeyw",
+    "regqueryvalueexa", "regqueryvalueexw", "regqueryvaluea", "regqueryvaluew",
+    "reggetvaluea", "reggetvaluew", "regenumkeyexa", "regenumkeyexw",
+    "regenumvaluea", "regenumvaluew",
+})
+_REG_WRITE_APIS = frozenset({
+    "regsetvalueexa", "regsetvalueexw", "regsetvaluea", "regsetvaluew",
+    "regcreatekeyexa", "regcreatekeyexw", "regcreatekeya", "regcreatekeyw",
+    "regdeletekeya", "regdeletekeyw", "regdeletevaluea", "regdeletevaluew",
+    "regsavekeya", "regsavekeyw",
+})
 
 # APIs that touch the network.
-_NET_APIS = (
-    "socket", "connect", "bind", "listen", "accept", "send", "recv",
-    "wsastartup", "internetopen", "internetconnect", "httpopenrequest",
-    "urldownloadtofile", "wsaconnect", "getaddrinfo",
-)
+_NET_APIS = frozenset({
+    "socket", "connect", "bind", "listen", "accept", "send", "sendto",
+    "recv", "recvfrom", "closesocket", "wsastartup", "wsacleanup",
+    "wsasocketa", "wsasocketw", "wsaconnect", "internetopena", "internetopenw",
+    "internetconnecta", "internetconnectw", "httpopenrequesta",
+    "httpopenrequestw", "httpsendrequesta", "httpsendrequestw",
+    "urldownloadtofilea", "urldownloadtofilew", "gethostbyname", "getaddrinfo",
+})
 
 # C-runtime / emulator plumbing that is never interesting to an analyst.
 _API_NOISE = re.compile(
@@ -181,14 +273,25 @@ _JUNK_PREFIX = '(["_$?0123456789@*'
 _DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:\\")
 _PWLIKE_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 
+# Flag-like token ("FCSC{...}", "flag{...}"): a name, a brace, printable body.
+_FLAG_LIKE_RE = re.compile(r"\b[A-Za-z0-9_]{2,20}\{[^}\s]{1,80}\}")
+
+# MinGW-w64 CRT/linker leftovers that carry format specifiers but no analyst
+# value ("Unknown pseudo relocation ... %d", ".refptr.__imp__acmdln", "%oldprot").
+_CRT_NOISE_RE = re.compile(
+    r"pseudo relocation|no image-section|_matherr|VirtualQuery failed|"
+    r"VirtualProtect failed|\.refptr\.|^%[A-Za-z_]\w*$",
+    re.IGNORECASE,
+)
+
 
 def _categorize(api: str) -> str:
-    low = api.lower()
-    for cat, prefixes in _API_CATEGORIES.items():
-        for p in prefixes:
-            if p in low:
-                return cat
-    return "Other"
+    """Map an API to its family using an exact (case-insensitive) lookup.
+
+    Exact matching avoids substring false positives such as ``SendMessageA``
+    -> Network or ``GetSystemMetrics`` -> Process.
+    """
+    return _API_NAME_INDEX.get(api.lower(), "Other")
 
 
 def _ts_to_str(stamp: int) -> str:
@@ -333,7 +436,12 @@ def analyze_pe_capabilities(path: str) -> Capabilities:
     ascii_strings, unicode_strings = _pe_strings(path)
     caps.strings = ascii_strings[:200]
     caps.unicode_strings = unicode_strings[:60]
-    caps.interesting_strings = _interesting(ascii_strings + unicode_strings)
+    # Notable strings, de-noised, split by encoding: ASCII ones (paths, flags,
+    # format strings) plus the UTF-16 ones Windows leans on. The flat view feeds
+    # synthesis and the emulation string hints.
+    caps.notable_ascii_strings = _interesting(ascii_strings)
+    notable_unicode = _interesting(unicode_strings)
+    caps.interesting_strings = caps.notable_ascii_strings + notable_unicode
     caps.strings_summary = _summarize(ascii_strings, unicode_strings)
 
     if caps.tools_available["capa"]:
@@ -405,15 +513,18 @@ def _interesting(strings: List[str]) -> List[str]:
     for s in strings:
         if s in seen:
             continue
-        if _PE_NOISE_RE.search(s):
+        if _PE_NOISE_RE.search(s) or _CRT_NOISE_RE.search(s):
             continue
         strong = bool(_STRONG_KEYWORD_RE.search(s))
-        # Keep paths, URLs, human messages and strong keywords; drop bare
-        # identifiers (C-runtime symbols, DWARF field names) and symbol
-        # leftovers with a junk prefix - they are pure noise to an analyst.
+        # Keep paths, URLs, human messages, format strings (e.g. "FCSC{%.32s}"),
+        # flag-like tokens and strong keywords; drop bare identifiers
+        # (C-runtime symbols, DWARF field names) and symbol leftovers with a
+        # junk prefix - they are pure noise to an analyst.
         keep = (
             _INTERESTING_RE.search(s)
             or _MESSAGE_RE.search(s)
+            or _FORMAT_RE.search(s)
+            or _FLAG_LIKE_RE.search(s)
             or strong
         )
         if not keep:
@@ -501,11 +612,26 @@ def _speakeasy_config(command_line: str, env: Dict[str, str], timeout: float) ->
     return base
 
 
+def _speakeasy_unavailable_message() -> str:
+    """Explain why Speakeasy is unavailable, including the real error if any."""
+    err = globals().get("_SPEAKEASY_IMPORT_ERROR")
+    if err is None:
+        return "speakeasy not installed - dynamic PE emulation skipped (pip install speakeasy-emulator)."
+    if isinstance(err, ModuleNotFoundError):
+        missing = err.name or "a required module"
+        if missing != "speakeasy":
+            return (f"speakeasy import failed: missing dependency '{missing}' "
+                    f"(pip install speakeasy-emulator). Dynamic PE emulation skipped.")
+        return "speakeasy not installed - dynamic PE emulation skipped (pip install speakeasy-emulator)."
+    return (f"speakeasy import failed: {type(err).__name__}: {err}. "
+            "Dynamic PE emulation skipped.")
+
+
 def _emulate(path: str, command_line: str, env: Dict[str, str],
              timeout: float) -> Tuple[List[dict], Optional[str]]:
     """Run one emulation pass; return the list of recorded API calls."""
     if speakeasy is None:
-        return [], "speakeasy not installed"
+        return [], _speakeasy_unavailable_message()
     try:
         se = speakeasy.Speakeasy(config=_speakeasy_config(command_line, env, timeout))
         module = se.load_module(path)
@@ -537,8 +663,7 @@ def run_pe_emulation(
     runs: List[RunResult] = []
 
     if speakeasy is None:
-        warnings.append("speakeasy not installed - dynamic PE emulation skipped "
-                        "(pip install speakeasy-emulator).")
+        warnings.append(_speakeasy_unavailable_message())
         stimuli.note = "dynamic emulation unavailable"
         return runs, stimuli, behavior, warnings
 
@@ -656,14 +781,14 @@ class _PeBehaviorAccumulator:
     def add(self, base: str, low: str, args: List) -> None:
         str_args = [a for a in args if isinstance(a, str) and _STR_ARG_HINT.match(a)]
 
-        if any(p in low for p in _INPUT_APIS):
+        if low in _INPUT_APIS:
             self._add(self.input_apis, base)
 
-        if any(p in low for p in _EXEC_APIS):
+        if low in _EXEC_APIS:
             desc = f"{base}: {str_args[0]}" if str_args else base
             self._add(self.exec_calls, desc)
 
-        if "createfile" in low or low in ("fopen", "readfile", "writefile"):
+        if low in _FILE_APIS:
             path_arg = next((a for a in str_args if re.match(r"^[A-Za-z]:\\", a)), None)
             if path_arg:
                 joined = " ".join(str(a) for a in args).upper()
@@ -672,22 +797,22 @@ class _PeBehaviorAccumulator:
                 else:
                     self._add(self.files_read, path_arg)
 
-        if low.startswith(("regopenkey", "regqueryvalue", "reggetvalue", "regenumkey")):
+        if low in _REG_READ_APIS:
             key = next((a for a in str_args if "\\" in a), None)
             if key:
                 self._add(self.reg_reads, key)
-        if low.startswith(("regsetvalue", "regcreatekey", "regdelete")):
+        if low in _REG_WRITE_APIS:
             key = next((a for a in str_args if "\\" in a), None)
             if key:
                 self._add(self.reg_writes, key)
 
-        if any(p in low for p in _NET_APIS):
+        if low in _NET_APIS:
             self._add(self.network, base)
             for a in args:
                 if isinstance(a, str) and re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", a):
                     self._add(self.network, a)
 
-        if any(p in low for p in _MESSAGE_APIS):
+        if low in _MESSAGE_APIS:
             for a in str_args:
                 if len(a) > 3:
                     self._add(self.message_strings, a)

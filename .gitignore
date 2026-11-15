@@ -17,6 +17,7 @@ tests/fixtures/sample_num_arg
 tests/fixtures/sample_pe_env_cmd.exe
 tests/fixtures/sample_pe_file_net.exe
 tests/fixtures/sample_pe_check_file.exe
+tests/fixtures/sample_pe_gui.exe
 tests/fixtures/sample_pe_dll.dll
 
 # binscope scratch

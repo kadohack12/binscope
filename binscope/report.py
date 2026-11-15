@@ -308,9 +308,11 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         ct.add_row("imports", ", ".join(caps.imports))
     if caps.strings_summary:
         ct.add_row("strings summary", "\n".join(caps.strings_summary))
+    if caps.notable_ascii_strings:
+        ct.add_row("notable strings (ASCII)", "\n".join(caps.notable_ascii_strings))
     if caps.unicode_strings:
-        ct.add_row("UTF-16 strings", "\n".join(caps.unicode_strings[:15]))
-    if caps.interesting_strings:
+        ct.add_row("notable strings (UTF-16)", "\n".join(caps.unicode_strings[:15]))
+    if caps.interesting_strings and not caps.notable_ascii_strings:
         ct.add_row("notable strings", "\n".join(caps.interesting_strings))
     ct.add_row("capa", "available" if caps.tools_available.get("capa") else "not installed")
     ct.add_row("floss", "available" if caps.tools_available.get("floss") else "not installed")
@@ -457,11 +459,15 @@ def to_markdown(result: AnalysisResult) -> str:
         lines.append("- **strings summary**:")
         for s in caps.strings_summary:
             lines.append(f"  - `{s}`")
+    if caps.notable_ascii_strings:
+        lines.append("- **notable strings (ASCII)**:")
+        for s in caps.notable_ascii_strings:
+            lines.append(f"  - `{s}`")
     if caps.unicode_strings:
-        lines.append("- **UTF-16 strings**:")
+        lines.append("- **notable strings (UTF-16)**:")
         for s in caps.unicode_strings[:15]:
             lines.append(f"  - `{s}`")
-    if caps.interesting_strings:
+    if caps.interesting_strings and not caps.notable_ascii_strings:
         lines.append("Notable strings:\n")
         for s in caps.interesting_strings:
             lines.append(f"- `{s}`")
