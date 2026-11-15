@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "binscope"
-version = "0.3.0"
+version = "0.3.1"
 description = "Understand quickly what a Linux ELF or Windows PE binary expects and what it really does."
 readme = "README.md"
 requires-python = ">=3.9"

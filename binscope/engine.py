@@ -561,7 +561,7 @@ def run_stimulation(
         ltrace_text = ""
         if have_strace:
             strace_text, exit_code, timed_out, out, err = _run_tracer(
-                target, attempt.argv, attempt.env, attempt.stdin, workdir, "strace", timeout
+                target_abs, attempt.argv, attempt.env, attempt.stdin, workdir, "strace", timeout
             )
             run.exit_code = exit_code
             run.timed_out = timed_out
@@ -582,7 +582,7 @@ def run_stimulation(
 
         if have_ltrace:
             ltrace_text, _ec, _to, _out, _err = _run_tracer(
-                target, attempt.argv, attempt.env, attempt.stdin, workdir, "ltrace", timeout
+                target_abs, attempt.argv, attempt.env, attempt.stdin, workdir, "ltrace", timeout
             )
             lparsed = parse_ltrace(ltrace_text, target_abs, injected)
             for name in lparsed["env_vars"]:

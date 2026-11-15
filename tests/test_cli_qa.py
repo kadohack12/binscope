@@ -67,3 +67,18 @@ def test_cli_non_ascii_path_no_self_execve(bins, tmp_path, capsys):
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
     assert data["behavior"]["execve"] == []
+
+
+def test_analyze_relative_path_matches_absolute(bins, monkeypatch):
+    """The public analyze() API must accept a relative path (traced from a
+    temp cwd), not silently return an empty report."""
+    from binscope.cli import analyze
+
+    monkeypatch.chdir(os.path.dirname(os.path.dirname(os.path.abspath(bins["sample_stdin_file"]))))
+    rel = os.path.relpath(bins["sample_stdin_file"])
+    assert not os.path.isabs(rel)
+
+    result = analyze(rel)
+    assert "hunter2" in result.stimuli.comparisons
+    assert "/tmp/binscope_pwned.txt" in result.behavior.files_written
+    assert any("9999" in n for n in result.behavior.network)

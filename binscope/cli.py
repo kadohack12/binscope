@@ -42,6 +42,7 @@ def detect_format(path: str) -> str:
 def analyze(path: str, auto_stub: bool = False, timeout: float = 2.0) -> AnalysisResult:
     """Run the full static + dynamic analysis and return the result model."""
     result = AnalysisResult()
+    path = os.path.abspath(path)
     if not os.path.exists(path):
         result.warnings.append(f"Target not found: {path}")
         return result
