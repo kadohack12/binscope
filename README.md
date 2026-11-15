@@ -88,3 +88,7 @@ the full analysis on them:
 pip install -e ".[test]"
 pytest -v
 ```
+
+## License
+
+Released under the [MIT License](LICENSE). © 2026 kadohack12.

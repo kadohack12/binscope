@@ -8,8 +8,14 @@ version = "0.2.0"
 description = "Understand quickly what a Linux ELF binary expects and what it really does."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
-authors = [{ name = "binscope" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "kadohack12" }]
+keywords = ["security", "malware-analysis", "reverse-engineering", "ctf", "elf", "strace", "ltrace"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
 dependencies = ["rich>=12.0"]
 
 [project.optional-dependencies]
