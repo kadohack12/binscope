@@ -8,7 +8,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
-SAMPLES = ["sample_env_cmd", "sample_stdin_file", "sample_check_file"]
+SAMPLES = ["sample_env_cmd", "sample_stdin_file", "sample_check_file", "sample_num_arg"]
 
 
 @pytest.fixture(scope="session", autouse=True)

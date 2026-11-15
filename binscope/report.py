@@ -67,6 +67,12 @@ def build_synthesis(result: AnalysisResult) -> List[str]:
         inputs.append("expected files " + ", ".join(stim.missing_files[:5]))
     if stim.comparisons:
         inputs.append("string checks " + ", ".join(f"'{c}'" for c in stim.comparisons[:5]))
+    if stim.numeric_probes:
+        inputs.append("numeric argv/stdin " + ", ".join(stim.numeric_probes[:6]))
+    if stim.argc_expected is not None:
+        inputs.append(f"~{stim.argc_expected} argument(s)")
+    if stim.exit_code_changes:
+        inputs.append("exit-code change " + ", ".join(stim.exit_code_changes[:3]))
     if stim.stdin_expected:
         inputs.append("stdin")
     if inputs:
@@ -86,10 +92,12 @@ def build_synthesis(result: AnalysisResult) -> List[str]:
         actions.append("deletes " + ", ".join(beh.files_deleted[:4]))
     if beh.network:
         actions.append("network " + ", ".join(beh.network[:4]))
+    if beh.stdout_output:
+        actions.append("prints " + " / ".join(beh.stdout_output[:3]))
     if actions:
         bullets.append("Observed actions: " + "; ".join(actions) + ".")
     else:
-        bullets.append("No child process, file write or network activity observed.")
+        bullets.append("No child process, file write, network or notable output observed.")
 
     # Static hints
     hints = []
@@ -124,7 +132,7 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
     t.add_column(style="bold")
     t.add_column()
     t.add_row("Path", idn.path)
-    t.add_row("Arch", f"{idn.bits} {idn.arch} ({idn.endianness} endian)")
+    t.add_row("Arch", f"{idn.bits}-bit {idn.arch} ({idn.endianness} endian)" if idn.bits else f"{idn.arch} ({idn.endianness} endian)")
     t.add_row("Type", idn.elf_type)
     t.add_row("Interp", idn.interp or "-")
     t.add_row("Stripped", _yn(idn.stripped) if idn.stripped is not None else "?")
@@ -156,9 +164,19 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         st.add_row("missing files", ", ".join(stim.missing_files))
     if stim.comparisons:
         st.add_row("string compare", ", ".join(stim.comparisons))
+    if stim.numeric_probes:
+        st.add_row("numeric input", ", ".join(stim.numeric_probes))
+    if stim.argc_expected is not None:
+        st.add_row("argc", f"expects ~{stim.argc_expected} argument(s)")
+    if stim.exit_code_changes:
+        st.add_row("exit code trigger", "\n".join(stim.exit_code_changes))
+    if stim.output_changes:
+        st.add_row("output trigger", "\n".join(stim.output_changes))
     if stim.stdin_expected:
         st.add_row("stdin", "expected" + (f" ({', '.join(stim.stdin_patterns)})" if stim.stdin_patterns else ""))
-    if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons, stim.stdin_expected]):
+    if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons,
+                stim.numeric_probes, stim.exit_code_changes, stim.output_changes,
+                stim.argc_expected is not None, stim.stdin_expected]):
         st.add_row("-", "no specific stimulus detected")
     body = st
     if stim.help_text:
@@ -182,7 +200,14 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         bt.add_row("files deleted", "\n".join(beh.files_deleted))
     if beh.network:
         bt.add_row("network", "\n".join(beh.network))
-    if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted, beh.network]):
+    if beh.stdout_output:
+        bt.add_row("stdout", "\n".join(beh.stdout_output))
+    if beh.stderr_output:
+        bt.add_row("stderr", "\n".join(beh.stderr_output))
+    if beh.exit_codes:
+        bt.add_row("exit codes", "\n".join(beh.exit_codes))
+    if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted,
+                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes]):
         bt.add_row("-", "no significant action observed")
     console.print(Panel(bt, title="[bold]3. Behaviour - what it really does[/bold]", border_style="green"))
 
@@ -190,6 +215,10 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
     ct = Table(show_header=False, box=None)
     ct.add_column(style="bold")
     ct.add_column()
+    if caps.imports:
+        ct.add_row("imports", ", ".join(caps.imports))
+    if caps.strings_summary:
+        ct.add_row("strings summary", "\n".join(caps.strings_summary))
     if caps.interesting_strings:
         ct.add_row("notable strings", "\n".join(caps.interesting_strings))
     ct.add_row("capa", "available" if caps.tools_available.get("capa") else "not installed")
@@ -253,9 +282,19 @@ def to_markdown(result: AnalysisResult) -> str:
         lines.append(f"- **missing files**: {', '.join('`'+f+'`' for f in stim.missing_files)}")
     if stim.comparisons:
         lines.append(f"- **string comparisons**: {', '.join('`'+c+'`' for c in stim.comparisons)}")
+    if stim.numeric_probes:
+        lines.append(f"- **numeric input**: {', '.join('`'+n+'`' for n in stim.numeric_probes)}")
+    if stim.argc_expected is not None:
+        lines.append(f"- **argc**: expects ~{stim.argc_expected} argument(s)")
+    if stim.exit_code_changes:
+        lines.append("- **exit code trigger**: " + "; ".join(f"`{c}`" for c in stim.exit_code_changes))
+    if stim.output_changes:
+        lines.append("- **output trigger**: " + "; ".join(f"`{c}`" for c in stim.output_changes))
     if stim.stdin_expected:
         lines.append("- **stdin**: expected")
-    if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons, stim.stdin_expected]):
+    if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons,
+                stim.numeric_probes, stim.exit_code_changes, stim.output_changes,
+                stim.argc_expected is not None, stim.stdin_expected]):
         lines.append("- No specific stimulus detected.")
     if stim.help_text:
         lines.append("\n### Help output\n")
@@ -275,11 +314,28 @@ def to_markdown(result: AnalysisResult) -> str:
         lines.append(f"- **files deleted**: {', '.join('`'+f+'`' for f in beh.files_deleted)}")
     if beh.network:
         lines.append(f"- **network**: {', '.join('`'+n+'`' for n in beh.network)}")
-    if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted, beh.network]):
+    if beh.stdout_output:
+        lines.append("- **stdout output**:")
+        for s in beh.stdout_output:
+            lines.append(f"  - `{s}`")
+    if beh.stderr_output:
+        lines.append("- **stderr output**:")
+        for s in beh.stderr_output:
+            lines.append(f"  - `{s}`")
+    if beh.exit_codes:
+        lines.append(f"- **exit codes**: {', '.join('`'+e+'`' for e in beh.exit_codes)}")
+    if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted,
+                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes]):
         lines.append("- No significant action observed.")
     lines.append("")
 
     lines.append("## 4. Static capabilities & hints\n")
+    if caps.imports:
+        lines.append(f"- **imports**: {', '.join('`'+i+'`' for i in caps.imports)}")
+    if caps.strings_summary:
+        lines.append("- **strings summary**:")
+        for s in caps.strings_summary:
+            lines.append(f"  - `{s}`")
     if caps.interesting_strings:
         lines.append("Notable strings:\n")
         for s in caps.interesting_strings:

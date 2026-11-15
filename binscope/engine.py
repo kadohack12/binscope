@@ -70,6 +70,10 @@ _OPTION_RE = re.compile(r"^--?[A-Za-z][A-Za-z0-9_-]{0,24}$")
 _OPTION_FIND = re.compile(r"(?:^|\s)(--?[A-Za-z][A-Za-z0-9_-]{0,24})")
 _WORD_RE = re.compile(r"^[A-Za-z0-9_.@/-]{2,40}$")
 
+# Boundary integers used to probe strtol/atoi/strtod-style parsing, including
+# the signed/unsigned traps (a "-2" read as unsigned wraps to a huge value).
+_NUMERIC_PROBES = ("0", "1", "-1", "-2", "2", "42", "1337", "2147483647", "4294967295")
+
 
 
 def _is_noise(path: str) -> bool:
@@ -263,7 +267,8 @@ def parse_ltrace(text: str, target: str, injected: Set[str] | None = None) -> di
     discovery (a constant held by the binary).
     """
     injected = injected or set()
-    res = {"env_vars": [], "comparisons": [], "stdin_calls": False, "exec": []}
+    res = {"env_vars": [], "comparisons": [], "stdin_calls": False, "exec": [],
+           "numeric_calls": [], "getopt": False, "ptrace": False, "input_calls": []}
     base = os.path.basename(target)
     # system()/popen() spawn /bin/sh (and the programs it runs), whose internal
     # string comparisons are pure noise. ltrace prints the traced process first,
@@ -310,8 +315,28 @@ def parse_ltrace(text: str, target: str, injected: Set[str] | None = None) -> di
             for lit in constants:
                 res["comparisons"].append((func, [lit]))
 
-        elif func in ("fgets", "gets", "scanf", "__isoc99_scanf"):
+        elif func in ("strtol", "strtoul", "strtoll", "strtoull", "atoi", "atol",
+                      "atoll", "strtod", "strtof", "strtold"):
+            # Record the numeric conversion family and its base when visible.
+            res["numeric_calls"].append((func, args.strip()))
+
+        elif func in ("sscanf", "scanf", "__isoc99_scanf", "fscanf",
+                      "__isoc99_sscanf", "__isoc99_fscanf"):
             res["stdin_calls"] = True
+            res["input_calls"].append(func)
+
+        elif func == "getopt" or func == "getopt_long" or func == "getopt_long_only":
+            res["getopt"] = True
+
+        elif func == "ptrace":
+            res["ptrace"] = True
+
+        elif func in ("fgets", "gets", "getline", "getdelim", "fread", "readline"):
+            res["stdin_calls"] = True
+            res["input_calls"].append(func)
+
+        elif func == "strlen":
+            res["input_calls"].append("strlen")
 
         elif func in ("read",) and re.match(r"\s*0\s*,", args):
             res["stdin_calls"] = True
@@ -331,8 +356,11 @@ def _run_tracer(
     workdir: str,
     tracer: str,
     timeout: float,
-) -> Tuple[str, Optional[int], bool, str]:
-    """Run one pass under a tracer; return (trace, exit_code, timed_out, stdout)."""
+) -> Tuple[str, Optional[int], bool, str, str]:
+    """Run one pass under a tracer.
+
+    Returns ``(trace, exit_code, timed_out, stdout, stderr)``.
+    """
     tracefile = os.path.join(workdir, f".binscope.{tracer}.trace")
     if tracer == "strace":
         cmd = ["strace", "-f", "-qq", "-s", "512", "-e", "trace=" + STRACE_SET, "-o", tracefile, target]
@@ -350,6 +378,7 @@ def _run_tracer(
     exit_code: Optional[int] = None
     timed_out = False
     stdout_text = ""
+    stderr_text = ""
     try:
         proc = subprocess.Popen(
             cmd,
@@ -362,11 +391,12 @@ def _run_tracer(
             start_new_session=True,
         )
     except OSError:
-        return "", None, False, ""
+        return "", None, False, "", ""
 
     try:
-        out, _err = proc.communicate(input=stdin_data, timeout=timeout)
+        out, err = proc.communicate(input=stdin_data, timeout=timeout)
         stdout_text = out or ""
+        stderr_text = err or ""
         exit_code = proc.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
@@ -375,8 +405,9 @@ def _run_tracer(
         except OSError:
             pass
         try:
-            out, _err = proc.communicate(timeout=5)
+            out, err = proc.communicate(timeout=5)
             stdout_text = out or ""
+            stderr_text = err or ""
         except Exception:
             pass
 
@@ -385,7 +416,7 @@ def _run_tracer(
             trace_text = fh.read()
     except OSError:
         trace_text = ""
-    return trace_text, exit_code, timed_out, stdout_text
+    return trace_text, exit_code, timed_out, stdout_text, stderr_text
 
 
 def _snapshot(workdir: str) -> Set[str]:
@@ -418,7 +449,7 @@ def run_stimulation(
     static_strings: Sequence[str] = (),
     auto_stub: bool = False,
     timeout: float = 2.0,
-    max_runs: int = 28,
+    max_runs: int = 64,
 ) -> Tuple[List[RunResult], Stimuli, Behavior, List[str]]:
     """Execute the multi-pass stimulation loop and aggregate the findings."""
     warnings: List[str] = []
@@ -451,11 +482,16 @@ def run_stimulation(
     env_vars: Set[str] = set()
     literals: Set[str] = set()
     missing_files: Set[str] = set()
+    numeric_calls: Set[str] = set()
     argv_hits: List[str] = []
     stdin_hits: List[str] = []
+    uses_getopt: List[bool] = [False]
+    anti_debug: List[bool] = [False]
 
     seen: Set[tuple] = set()
     tried_combos: Set[tuple] = set()
+    tried_numeric: Set[str] = set()
+    tried_argc: Set[int] = set()
     queue: List[_Attempt] = []
     high: List[_Attempt] = []  # discovery-driven passes run before token guesses
 
@@ -469,9 +505,12 @@ def run_stimulation(
     enqueue(_Attempt("pass1: no args, empty stdin", [], {}, ""))
     enqueue(_Attempt("pass2: -h", ["-h"], {}, "help\n"))
     enqueue(_Attempt("pass2: --help", ["--help"], {}, "help\n"))
-    enqueue(_Attempt("pass2: 1 arg", ["1"], {}, "1\n"))
-    enqueue(_Attempt("pass2: 2 args", ["1", "2"], {}, "1\n"))
-    enqueue(_Attempt("pass2: 3 args", ["1", "2", "3"], {}, "1\n"))
+    # argc ladder: identical empty stdin to the baseline, only the arg count varies.
+    enqueue(_Attempt("pass2: argc 1", ["1"], {}, ""))
+    enqueue(_Attempt("pass2: argc 2", ["1", "2"], {}, ""))
+    enqueue(_Attempt("pass2: argc 3", ["1", "2", "3"], {}, ""))
+    enqueue(_Attempt("pass2: argc 4", ["1", "2", "3", "4"], {}, ""))
+    enqueue(_Attempt("pass2: argc 5", ["1", "2", "3", "4", "5"], {}, ""))
     enqueue(_Attempt("pass2: stdin 'test'", [], {}, "test\n"))
     enqueue(_Attempt("pass2: stdin 'admin'", [], {}, "admin\n"))
     enqueue(_Attempt("pass2: stdin multiline", [], {}, "help\n1\nadmin\n"))
@@ -513,12 +552,13 @@ def run_stimulation(
         strace_text = ""
         ltrace_text = ""
         if have_strace:
-            strace_text, exit_code, timed_out, out = _run_tracer(
+            strace_text, exit_code, timed_out, out, err = _run_tracer(
                 target, attempt.argv, attempt.env, attempt.stdin, workdir, "strace", timeout
             )
             run.exit_code = exit_code
             run.timed_out = timed_out
             run.stdout = out
+            run.stderr = err
             parsed = parse_strace(strace_text, target_abs, workdir)
             run.execve = [f"{p} {' '.join(a[1:])}".strip() for p, a in parsed["execve"]]
             run.connect_success = parsed["connect_success"]
@@ -526,14 +566,14 @@ def run_stimulation(
             run.files_read = parsed["files_read"]
             _merge(behavior, parsed)
             _merge_stimuli_files(stimuli, parsed)
-            for path, err in parsed["missing_files"]:
-                if err == "ENOENT" and not _is_noise(path):
+            for path, err_name in parsed["missing_files"]:
+                if err_name == "ENOENT" and not _is_noise(path):
                     missing_files.add(path)
             if parsed["stdin_read"]:
                 run.stdin_read = True
 
         if have_ltrace:
-            ltrace_text, _ec, _to, _out = _run_tracer(
+            ltrace_text, _ec, _to, _out, _err = _run_tracer(
                 target, attempt.argv, attempt.env, attempt.stdin, workdir, "ltrace", timeout
             )
             lparsed = parse_ltrace(ltrace_text, target_abs, injected)
@@ -543,6 +583,15 @@ def run_stimulation(
                 for lit in lits:
                     if len(lit) >= 2 and not _is_noise(lit) and len(lit) <= 64:
                         literals.add(lit)
+            for func, call_args in lparsed["numeric_calls"]:
+                numeric_calls.add(func)
+                base_m = re.search(r",\s*(\d+)\s*\)", call_args)
+                if base_m:
+                    numeric_calls.add(f"{func}(base {base_m.group(1)})")
+            if lparsed["getopt"]:
+                uses_getopt[0] = True
+            if lparsed["ptrace"]:
+                anti_debug[0] = True
             if lparsed["stdin_calls"]:
                 run.stdin_read = True
             for cmd in lparsed["exec"]:
@@ -569,10 +618,11 @@ def run_stimulation(
         _schedule_discoveries(high, seen, env_vars, literals, missing_files,
                               workdir, auto_stub)
         _schedule_combos(high, seen, tried_combos, env_vars, option_tokens)
+        _schedule_numeric(high, seen, tried_numeric, numeric_calls)
         _schedule_tokens(queue, seen, option_tokens, word_tokens)
 
     _finalize(stimuli, behavior, env_vars, literals, missing_files,
-              baseline_run, runs)
+              baseline_run, runs, numeric_calls, uses_getopt[0], anti_debug[0])
     if not runs:
         warnings.append("No pass could be executed (tracer unavailable?).")
     return runs, stimuli, behavior, warnings
@@ -665,8 +715,26 @@ def _schedule_combos(queue, seen, tried_combos, env_vars, option_tokens) -> None
                     queue.append(a)
 
 
+def _schedule_numeric(queue, seen, tried_numeric, numeric_calls) -> None:
+    """Once a numeric conversion is seen, probe boundary integers on argv[1]/stdin."""
+    if not numeric_calls:
+        return
+    for probe in _NUMERIC_PROBES:
+        if probe in tried_numeric:
+            continue
+        tried_numeric.add(probe)
+        for label, argv, stdin in (
+            (f"pass3: numeric argv {probe}", [probe], f"{probe}\n"),
+            (f"pass3: numeric stdin {probe!r}", [], f"{probe}\n"),
+        ):
+            a = _Attempt(label, argv, {}, stdin)
+            if a.key() not in seen:
+                seen.add(a.key())
+                queue.append(a)
+
+
 def _run_events(run: RunResult) -> tuple:
-    """The externally visible events a run produced (for diffing runs)."""
+    """The externally visible *actions* a run produced (for unlock detection)."""
     events = []
     events += ["exec:" + e for e in run.execve]
     events += ["net:" + n for n in run.connect_success]
@@ -675,16 +743,80 @@ def _run_events(run: RunResult) -> tuple:
     return (run.exit_code, tuple(sorted(events)))
 
 
+_TRACER_NOISE_RE = re.compile(r"^(?:\+\+\+|strace:|ltrace:|binscope)")
+
+
+def _clean_output(text: str) -> str:
+    """Drop tracer diagnostics and normalise whitespace for comparison."""
+    lines = [
+        ln for ln in (text or "").splitlines()
+        if ln.strip() and not _TRACER_NOISE_RE.match(ln.strip())
+    ]
+    return "\n".join(ln.rstrip() for ln in lines).strip()
+
+
+def _describe_run(run: RunResult) -> str:
+    """A compact, human-readable description of what a pass varied."""
+    bits = []
+    if run.argv:
+        bits.append("argv " + " ".join(run.argv))
+    if run.env:
+        bits.append("env " + " ".join(f"{k}={v}" for k, v in sorted(run.env.items())))
+    stdin_val = run.stdin.strip()
+    if not bits and stdin_val:
+        bits.append(f"stdin {stdin_val!r}")
+    if run.stub:
+        bits.append(f"stub {run.stub}")
+    return ", ".join(bits) or run.label
+
+
+# Output substrings that indicate the pass revealed a *meaningful* result
+# (accepted password, a flag, a spawned payload) rather than a rejection.
+_REVEAL_RE = re.compile(
+    r"(flag\{|accepted|unlocked|granted|correct|secret|payload|success|"
+    r"stage_two|welcome)",
+    re.IGNORECASE,
+)
+
+
+def _trigger_score(run: RunResult, output_blob: str) -> int:
+    """Lower is better: prefer the clearest, least-confounded trigger."""
+    score = 0
+    if not _REVEAL_RE.search(output_blob):
+        score += 10  # a reveal beats a plain rejection
+    if run.stdin.strip():
+        score += 0  # stdin is the primary channel for these challenges
+    else:
+        score += 1
+    score += len(run.env) + max(0, len(run.argv) - 1)  # fewer dimensions is clearer
+    if run.stub:
+        score += 1
+    return score
+
+
 def _finalize(stimuli, behavior, env_vars, literals, missing_files,
-              baseline_run, runs) -> None:
+              baseline_run, runs, numeric_calls=frozenset(),
+              uses_getopt=False, anti_debug=False) -> None:
     stimuli.env_vars = sorted(env_vars)
     stimuli.comparisons = sorted(literals)
     stimuli.missing_files = sorted(missing_files)
+    # Only claim numeric probing when a numeric conversion was actually seen.
+    stimuli.numeric_probes = (
+        [p for p in _NUMERIC_PROBES if p in _tested_probes(runs)]
+        if numeric_calls else []
+    )
 
-    # --- attribution ------------------------------------------------------- #
-    # A pass "changes behaviour" only if it triggers an action absent from the
-    # baseline (spawn/network/write), i.e. it *unlocked* something. This keeps
-    # usage/help output and mere stdin echo out of the results.
+    notes = []
+    if uses_getopt:
+        notes.append("uses getopt-style option parsing")
+    if anti_debug:
+        notes.append("calls ptrace() (possible anti-debug)")
+    if numeric_calls:
+        families = sorted({f for f in numeric_calls if "(" not in f})
+        notes.append("numeric parsing via " + ", ".join(families))
+    stimuli.note = "; ".join(notes)
+
+    # --- unlock attribution (action events) -------------------------------- #
     baseline_events = _run_events(baseline_run) if baseline_run else (None, ())
 
     def new_events(run: RunResult) -> bool:
@@ -698,7 +830,6 @@ def _finalize(stimuli, behavior, env_vars, literals, missing_files,
         has_env = bool(run.env)
         has_argv = bool(run.argv)
         stdin_val = run.stdin.strip()
-        # Attribute the trigger by which dimensions this pass varied.
         if has_argv:
             for tok in run.argv:
                 if tok not in argv_hits:
@@ -711,6 +842,90 @@ def _finalize(stimuli, behavior, env_vars, literals, missing_files,
     stimuli.argv = argv_hits
     stimuli.stdin_patterns = stdin_hits
     stimuli.stdin_expected = bool(stdin_hits) or any(r.stdin_read for r in runs)
+
+    # --- exit-code / stdout / stderr triggers ------------------------------ #
+    # A pass that flips the exit code or produces different output than the
+    # baseline revealed something, even without execve/network/file activity.
+    base_ec = baseline_run.exit_code if baseline_run else None
+    base_out = _clean_output(baseline_run.stdout) if baseline_run else ""
+    base_err = _clean_output(baseline_run.stderr) if baseline_run else ""
+    base_blob = base_out + "\n" + base_err
+
+    stdout_seen: List[str] = []
+    stderr_seen: List[str] = []
+    seen_out: Set[str] = set()
+    seen_err: Set[str] = set()
+
+    # Keep one representative pass per distinct transition, preferring the
+    # clearest trigger (revealing output, stdin over argv, fewest dimensions).
+    exit_best: Dict[str, Tuple[int, RunResult]] = {}
+    out_best: Dict[str, Tuple[int, str, RunResult]] = {}
+
+    for run in runs:
+        if run is baseline_run or run.timed_out:
+            continue
+        out = _clean_output(run.stdout)
+        err = _clean_output(run.stderr)
+        score = _trigger_score(run, out + "\n" + err)
+
+        if run.exit_code is not None and base_ec is not None and run.exit_code != base_ec:
+            key = str(run.exit_code)
+            if key not in exit_best or score < exit_best[key][0]:
+                exit_best[key] = (score, run)
+
+        for kind, blob in (("stdout", out), ("stderr", err)):
+            base_for_kind = base_out if kind == "stdout" else base_err
+            if not blob or blob == base_for_kind:
+                continue
+            first = blob.splitlines()[0][:80]
+            key = f"{kind}:{first}"
+            if key not in out_best or score < out_best[key][0]:
+                out_best[key] = (score, kind, run)
+
+        if out and out != base_out and out not in seen_out:
+            seen_out.add(out)
+            stdout_seen.extend(out.splitlines()[:2])
+        if err and err != base_err and err not in seen_err:
+            seen_err.add(err)
+            stderr_seen.extend(err.splitlines()[:2])
+
+    exit_changes = []
+    for code in sorted(exit_best, key=lambda c: int(c) if c.lstrip("-").isdigit() else 0):
+        _score, run = exit_best[code]
+        exit_changes.append(f"{_describe_run(run)} -> exit {code} (baseline {base_ec})")
+    output_changes = []
+    for _key, (_score, kind, run) in sorted(out_best.items(), key=lambda kv: kv[1][0]):
+        blob = _clean_output(run.stdout if kind == "stdout" else run.stderr)
+        first = blob.splitlines()[0][:80] if blob else ""
+        output_changes.append(f"{_describe_run(run)} -> {kind}: {first}")
+
+    stimuli.exit_code_changes = exit_changes[:5]
+    stimuli.output_changes = output_changes[:6]
+    behavior.stdout_output = stdout_seen[:12]
+    behavior.stderr_output = stderr_seen[:12]
+
+    exit_code_map: List[str] = []
+    if baseline_run is not None and base_ec is not None:
+        exit_code_map.append(f"{base_ec} (baseline)")
+    for code in sorted(exit_best, key=lambda c: int(c) if c.lstrip("-").isdigit() else 0):
+        _score, run = exit_best[code]
+        exit_code_map.append(f"{code} via {_describe_run(run)}")
+    behavior.exit_codes = exit_code_map[:8]
+
+    # --- argc sensitivity -------------------------------------------------- #
+    # Compare the dedicated argc ladder (same empty stdin as the baseline) to
+    # find the smallest argument count that changes exit code or output.
+    argc_candidates = set()
+    for run in runs:
+        if not run.label.startswith("pass2: argc") or run.timed_out:
+            continue
+        blob = _clean_output(run.stdout) + "\n" + _clean_output(run.stderr)
+        changed = (run.exit_code is not None and base_ec is not None
+                   and run.exit_code != base_ec) or (blob != base_blob)
+        if changed:
+            argc_candidates.add(len(run.argv))
+    if argc_candidates:
+        stimuli.argc_expected = min(argc_candidates)
 
     # Surface help text captured by a -h/--help pass, but only when the output
     # actually looks like usage/help (avoids "access denied" style messages).
@@ -734,3 +949,15 @@ def _finalize(stimuli, behavior, env_vars, literals, missing_files,
         if cmd not in collapsed:
             collapsed.append(cmd)
     behavior.execve = collapsed
+
+
+def _tested_probes(runs) -> Set[str]:
+    probes: Set[str] = set()
+    for run in runs:
+        for tok in run.argv:
+            if tok in _NUMERIC_PROBES:
+                probes.add(tok)
+        sv = run.stdin.strip()
+        if sv in _NUMERIC_PROBES:
+            probes.add(sv)
+    return probes

@@ -41,6 +41,10 @@ class Stimuli:
     comparisons: List[str] = field(default_factory=list)
     stdin_expected: bool = False
     stdin_patterns: List[str] = field(default_factory=list)
+    numeric_probes: List[str] = field(default_factory=list)
+    argc_expected: Optional[int] = None
+    exit_code_changes: List[str] = field(default_factory=list)
+    output_changes: List[str] = field(default_factory=list)
     help_text: str = ""
     note: str = ""
 
@@ -54,12 +58,17 @@ class Behavior:
     files_written: List[str] = field(default_factory=list)
     files_deleted: List[str] = field(default_factory=list)
     network: List[str] = field(default_factory=list)
+    stdout_output: List[str] = field(default_factory=list)
+    stderr_output: List[str] = field(default_factory=list)
+    exit_codes: List[str] = field(default_factory=list)
     note: str = ""
 
 @dataclass
 class Capabilities:
     strings: List[str] = field(default_factory=list)
     interesting_strings: List[str] = field(default_factory=list)
+    strings_summary: List[str] = field(default_factory=list)
+    imports: List[str] = field(default_factory=list)
     capa: Optional[dict] = None
     floss: Optional[List[str]] = None
     tools_available: Dict[str, bool] = field(default_factory=dict)

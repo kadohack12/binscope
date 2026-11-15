@@ -12,6 +12,7 @@ venv/
 tests/fixtures/sample_env_cmd
 tests/fixtures/sample_stdin_file
 tests/fixtures/sample_check_file
+tests/fixtures/sample_num_arg
 
 # binscope scratch
 *.binscope.trace

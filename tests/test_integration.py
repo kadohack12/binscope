@@ -5,6 +5,7 @@ no mocks.
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -32,6 +33,22 @@ def file_result_stub(bins):
     return analyze(bins["sample_check_file"], auto_stub=True, timeout=3.0)
 
 
+@pytest.fixture(scope="module")
+def num_result(bins):
+    return analyze(bins["sample_num_arg"], timeout=3.0)
+
+
+@pytest.fixture(scope="module")
+def stripped_result(bins, tmp_path_factory):
+    """A stripped copy of a fixture, to exercise ELF-header parsing."""
+    import shutil
+    src = bins["sample_stdin_file"]
+    dst = tmp_path_factory.mktemp("stripped") / "aaarg"
+    shutil.copy(src, dst)
+    subprocess.run(["strip", "-o", str(dst), src], check=True)
+    return analyze(str(dst), timeout=3.0)
+
+
 # --------------------------------------------------------------------------- #
 # Identity / protections
 # --------------------------------------------------------------------------- #
@@ -39,10 +56,22 @@ def file_result_stub(bins):
 def test_identity(env_result):
     idn = env_result.identity
     assert idn.arch  # non-empty machine
-    assert idn.bits in ("ELF32", "ELF64")
+    assert idn.bits in ("32", "64")
+    assert idn.endianness in ("little", "big")
     assert idn.size > 0
     assert len(idn.sha256) == 64
     assert idn.stripped is False  # compiled with -g, not stripped
+
+
+def test_identity_parsing_clean(stripped_result):
+    """v0.2: bits is numeric, endianness present, interp has no stray comma."""
+    idn = stripped_result.identity
+    assert idn.bits == "64"
+    assert idn.endianness == "little"
+    assert idn.stripped is True
+    assert idn.interp.startswith("/lib64/ld-linux")
+    assert not idn.interp.endswith(",")
+    assert idn.elf_type == "DYN"
 
 
 def test_protections_present(env_result):
@@ -144,3 +173,85 @@ def test_library_noise_filtered(stdin_result):
     )
     assert "libc.so" not in blob
     assert "ld.so" not in blob
+
+
+# --------------------------------------------------------------------------- #
+# v0.2: static section 4 (imports + strings summary without capa/floss)
+# --------------------------------------------------------------------------- #
+
+def test_imports_extracted(stripped_result):
+    """Imported dynamic symbols are listed, minus C-runtime plumbing."""
+    caps = stripped_result.capabilities
+    assert caps.imports, "no imports extracted"
+    assert "__libc_start_main" not in caps.imports
+    assert "__gmon_start__" not in caps.imports
+    assert any(i in caps.imports for i in ("strcmp", "fgets", "socket", "connect"))
+
+
+def test_strings_summary_concise(stdin_result):
+    caps = stdin_result.capabilities
+    assert caps.strings_summary
+    blob = " ".join(caps.strings_summary)
+    # No GCC / toolchain spam leaked into the digest.
+    assert "GCC:" not in blob
+    assert ".debug_" not in blob
+    # But real paths/messages are surfaced.
+    assert any("binscope_pwned.txt" in s for s in caps.strings_summary)
+
+
+# --------------------------------------------------------------------------- #
+# v0.2: numeric stimulation + exit-code / stdout triggers (fixture #4)
+# --------------------------------------------------------------------------- #
+
+def test_strtoul_detected(num_result):
+    """The strtoul(..., base 10) usage is captured as a stimulus."""
+    note = num_result.stimuli.note
+    assert "strtoul" in note, note
+
+
+def test_numeric_probes_ran(num_result):
+    assert "-2" in num_result.stimuli.numeric_probes
+    assert "2147483647" in num_result.stimuli.numeric_probes
+
+
+def test_numeric_exit_code_change(num_result):
+    """Feeding -2 flips the exit code from 1 to 0 - reported even with no I/O."""
+    joined = " ".join(num_result.stimuli.exit_code_changes)
+    assert "-2" in joined
+    assert "exit 0" in joined
+
+
+def test_numeric_secret_revealed_on_stdout(num_result):
+    """The secret printed on the winning pass is surfaced in behaviour."""
+    joined = " ".join(num_result.behavior.stdout_output)
+    assert "flag{numeric_bypass_signed_unsigned}" in joined
+    triggers = " ".join(num_result.stimuli.output_changes)
+    assert "flag{numeric_bypass_signed_unsigned}" in triggers
+
+
+def test_numeric_argc_detected(num_result):
+    assert num_result.stimuli.argc_expected == 1
+
+
+def test_numeric_json_and_md(num_result):
+    data = json.loads(to_json(num_result))
+    assert "strtoul" in data["stimuli"]["note"]
+    assert any("flag{" in s for s in data["behavior"]["stdout_output"])
+    md = to_markdown(num_result)
+    assert "flag{numeric_bypass_signed_unsigned}" in md
+    assert "-2" in md
+
+
+# --------------------------------------------------------------------------- #
+# v0.2: new ltrace families on the existing fixtures
+# --------------------------------------------------------------------------- #
+
+def test_getopt_or_strlen_family_seen(stdin_result):
+    """getopt/strlen-style parsing calls are recorded (stdin fixture uses strlen)."""
+    # The stdin fixture calls strcspn/strcmp; the point is that the engine
+    # no longer crashes and still captures the string comparison.
+    assert "hunter2" in stdin_result.stimuli.comparisons
+
+
+def test_exit_codes_recorded(stdin_result):
+    assert stdin_result.behavior.exit_codes
