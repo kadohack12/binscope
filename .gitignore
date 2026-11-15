@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Compiled fixtures (built from .c sources by tests/fixtures/build.sh)
+tests/fixtures/sample_env_cmd
+tests/fixtures/sample_stdin_file
+tests/fixtures/sample_check_file
+
+# binscope scratch
+*.binscope.trace
+
+# Agent memory / local tooling
+.openhands/

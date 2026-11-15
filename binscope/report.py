@@ -1,0 +1,294 @@
+"""Report rendering: rich terminal output plus JSON and Markdown exports."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from typing import List
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from .model import AnalysisResult
+
+
+def _yn(value) -> str:
+    if value is None:
+        return "?"
+    return "Yes" if value else "No"
+
+
+def _prot_style(ok, good: bool = True) -> str:
+    if ok is None:
+        return "dim"
+    if ok is good:
+        return "green"
+    return "yellow"
+
+
+# --------------------------------------------------------------------------- #
+# Analyst synthesis
+# --------------------------------------------------------------------------- #
+
+def build_synthesis(result: AnalysisResult) -> List[str]:
+    """Produce 3-5 plain-language bullet points describing the binary."""
+    idn = result.identity
+    prot = result.protections
+    stim = result.stimuli
+    beh = result.behavior
+    caps = result.capabilities
+    bullets: List[str] = []
+
+    arch = idn.arch or "unknown arch"
+    kind = "PIE executable" if prot.pie else "non-PIE executable"
+    strip = "not stripped (symbols present)" if idn.stripped is False else "stripped"
+    bullets.append(
+        f"ELF {idn.bits or '?'}-bit {arch} {kind}, {strip}, "
+        f"{idn.size} bytes, sha256 {idn.sha256[:16]}..."
+    )
+
+    prot_bits = []
+    prot_bits.append(("NX", prot.nx))
+    prot_bits.append(("Canary", prot.canary))
+    if prot.relro:
+        prot_bits.append((f"RELRO={prot.relro}", True))
+    prot_txt = ", ".join(f"{name}: {'on' if v else 'off'}" for name, v in prot_bits if v is not None)
+    bullets.append("Protections: " + (prot_txt or "none detected") + ".")
+
+    # Inputs
+    inputs = []
+    if stim.argv:
+        inputs.append("argv " + ", ".join(f"'{a}'" for a in stim.argv[:6]))
+    if stim.env_vars:
+        inputs.append("env " + ", ".join(stim.env_vars[:6]))
+    if stim.missing_files:
+        inputs.append("expected files " + ", ".join(stim.missing_files[:5]))
+    if stim.comparisons:
+        inputs.append("string checks " + ", ".join(f"'{c}'" for c in stim.comparisons[:5]))
+    if stim.stdin_expected:
+        inputs.append("stdin")
+    if inputs:
+        bullets.append("Waits for / reacts to: " + "; ".join(inputs) + ".")
+    else:
+        bullets.append("No specific external input was observed to change behaviour.")
+
+    # Behaviour
+    actions = []
+    if beh.execve:
+        actions.append("spawns " + "; ".join(beh.execve[:4]))
+    if beh.files_written:
+        actions.append("writes " + ", ".join(beh.files_written[:4]))
+    if beh.files_read:
+        actions.append("reads " + ", ".join(beh.files_read[:4]))
+    if beh.files_deleted:
+        actions.append("deletes " + ", ".join(beh.files_deleted[:4]))
+    if beh.network:
+        actions.append("network " + ", ".join(beh.network[:4]))
+    if actions:
+        bullets.append("Observed actions: " + "; ".join(actions) + ".")
+    else:
+        bullets.append("No child process, file write or network activity observed.")
+
+    # Static hints
+    hints = []
+    if caps.interesting_strings:
+        hints.append("notable strings: " + ", ".join(caps.interesting_strings[:5]))
+    if caps.capa:
+        hints.append(f"capa: {caps.capa.get('count', 0)} rule(s) matched")
+    if caps.floss:
+        hints.append(f"floss: {len(caps.floss)} decoded string(s)")
+    if hints:
+        bullets.append("Static hints: " + "; ".join(hints) + ".")
+
+    return bullets[:5]
+
+
+# --------------------------------------------------------------------------- #
+# Terminal rendering
+# --------------------------------------------------------------------------- #
+
+def render_console(result: AnalysisResult, console: Console | None = None) -> None:
+    console = console or Console()
+    idn = result.identity
+    prot = result.protections
+    stim = result.stimuli
+    beh = result.behavior
+    caps = result.capabilities
+
+    console.rule("[bold cyan]binscope[/bold cyan] - rapid ELF triage")
+
+    # 1. Identity
+    t = Table(show_header=False, box=None, pad_edge=False)
+    t.add_column(style="bold")
+    t.add_column()
+    t.add_row("Path", idn.path)
+    t.add_row("Arch", f"{idn.bits} {idn.arch} ({idn.endianness} endian)")
+    t.add_row("Type", idn.elf_type)
+    t.add_row("Interp", idn.interp or "-")
+    t.add_row("Stripped", _yn(idn.stripped) if idn.stripped is not None else "?")
+    t.add_row("Size", f"{idn.size} bytes")
+    t.add_row("SHA256", idn.sha256)
+    console.print(Panel(t, title="[bold]1. Identity[/bold]", border_style="cyan"))
+
+    pt = Table(show_header=False, box=None, pad_edge=False)
+    pt.add_column(style="bold")
+    pt.add_column()
+    pt.add_row("PIE", _yn(prot.pie))
+    pt.add_row("NX", _yn(prot.nx))
+    pt.add_row("Canary", _yn(prot.canary))
+    pt.add_row("RELRO", prot.relro or "?")
+    pt.add_row("FORTIFY", _yn(prot.fortify))
+    console.print(Panel(pt, title="[bold]Protections (checksec)[/bold]", border_style="cyan"))
+
+    # 2. Stimuli
+    st = Table(show_header=True, box=None, header_style="bold magenta")
+    st.add_column("Kind")
+    st.add_column("Values")
+    if stim.argv:
+        st.add_row("argv", ", ".join(stim.argv))
+    if stim.env_vars:
+        st.add_row("env", ", ".join(stim.env_vars))
+    if stim.files:
+        st.add_row("files checked", ", ".join(stim.files))
+    if stim.missing_files:
+        st.add_row("missing files", ", ".join(stim.missing_files))
+    if stim.comparisons:
+        st.add_row("string compare", ", ".join(stim.comparisons))
+    if stim.stdin_expected:
+        st.add_row("stdin", "expected" + (f" ({', '.join(stim.stdin_patterns)})" if stim.stdin_patterns else ""))
+    if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons, stim.stdin_expected]):
+        st.add_row("-", "no specific stimulus detected")
+    body = st
+    if stim.help_text:
+        body = Table.grid()
+        body.add_row(st)
+        body.add_row(Text(""))
+        body.add_row(Panel(stim.help_text, title="help output", border_style="dim"))
+    console.print(Panel(body, title="[bold]2. Stimuli - what it expects[/bold]", border_style="magenta"))
+
+    # 3. Behaviour
+    bt = Table(show_header=True, box=None, header_style="bold green")
+    bt.add_column("Kind")
+    bt.add_column("Values")
+    if beh.execve:
+        bt.add_row("execve", "\n".join(beh.execve))
+    if beh.files_read:
+        bt.add_row("files read", "\n".join(beh.files_read))
+    if beh.files_written:
+        bt.add_row("files written", "\n".join(beh.files_written))
+    if beh.files_deleted:
+        bt.add_row("files deleted", "\n".join(beh.files_deleted))
+    if beh.network:
+        bt.add_row("network", "\n".join(beh.network))
+    if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted, beh.network]):
+        bt.add_row("-", "no significant action observed")
+    console.print(Panel(bt, title="[bold]3. Behaviour - what it really does[/bold]", border_style="green"))
+
+    # 4. Capabilities
+    ct = Table(show_header=False, box=None)
+    ct.add_column(style="bold")
+    ct.add_column()
+    if caps.interesting_strings:
+        ct.add_row("notable strings", "\n".join(caps.interesting_strings))
+    ct.add_row("capa", "available" if caps.tools_available.get("capa") else "not installed")
+    ct.add_row("floss", "available" if caps.tools_available.get("floss") else "not installed")
+    if caps.note:
+        ct.add_row("note", caps.note)
+    console.print(Panel(ct, title="[bold]4. Static capabilities & hints[/bold]", border_style="yellow"))
+
+    # 5. Synthesis
+    syn = Text()
+    for b in result.synthesis:
+        syn.append("- ", style="bold")
+        syn.append(b + "\n")
+    console.print(Panel(syn, title="[bold]5. Analyst synthesis[/bold]", border_style="bright_blue"))
+
+    if result.warnings:
+        for w in result.warnings:
+            console.print(f"[yellow]! {w}[/yellow]")
+
+
+# --------------------------------------------------------------------------- #
+# Exports
+# --------------------------------------------------------------------------- #
+
+def to_json(result: AnalysisResult) -> str:
+    data = asdict(result)
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+def to_markdown(result: AnalysisResult) -> str:
+    idn = result.identity
+    prot = result.protections
+    stim = result.stimuli
+    beh = result.behavior
+    caps = result.capabilities
+    lines: List[str] = []
+    lines.append("# binscope report\n")
+    lines.append("## 1. Identity\n")
+    lines.append(f"- **Path**: `{idn.path}`")
+    lines.append(f"- **Arch**: {idn.bits} {idn.arch} ({idn.endianness} endian)")
+    lines.append(f"- **Type**: {idn.elf_type}")
+    lines.append(f"- **Interpreter**: {idn.interp or '-'}")
+    lines.append(f"- **Stripped**: {'Yes' if idn.stripped else 'No' if idn.stripped is not None else '?'}")
+    lines.append(f"- **Size**: {idn.size} bytes")
+    lines.append(f"- **SHA256**: `{idn.sha256}`\n")
+    lines.append("### Protections\n")
+    lines.append(f"- PIE: {_yn(prot.pie)}")
+    lines.append(f"- NX: {_yn(prot.nx)}")
+    lines.append(f"- Canary: {_yn(prot.canary)}")
+    lines.append(f"- RELRO: {prot.relro or '?'}")
+    lines.append(f"- FORTIFY: {_yn(prot.fortify)}\n")
+
+    lines.append("## 2. Stimuli - what it expects\n")
+    if stim.argv:
+        lines.append(f"- **argv**: {', '.join('`'+a+'`' for a in stim.argv)}")
+    if stim.env_vars:
+        lines.append(f"- **env vars**: {', '.join('`'+e+'`' for e in stim.env_vars)}")
+    if stim.files:
+        lines.append(f"- **files checked**: {', '.join('`'+f+'`' for f in stim.files)}")
+    if stim.missing_files:
+        lines.append(f"- **missing files**: {', '.join('`'+f+'`' for f in stim.missing_files)}")
+    if stim.comparisons:
+        lines.append(f"- **string comparisons**: {', '.join('`'+c+'`' for c in stim.comparisons)}")
+    if stim.stdin_expected:
+        lines.append("- **stdin**: expected")
+    if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons, stim.stdin_expected]):
+        lines.append("- No specific stimulus detected.")
+    if stim.help_text:
+        lines.append("\n### Help output\n")
+        lines.append("```\n" + stim.help_text + "\n```")
+    lines.append("")
+
+    lines.append("## 3. Behaviour - what it really does\n")
+    if beh.execve:
+        lines.append("- **execve**:")
+        for e in beh.execve:
+            lines.append(f"  - `{e}`")
+    if beh.files_read:
+        lines.append(f"- **files read**: {', '.join('`'+f+'`' for f in beh.files_read)}")
+    if beh.files_written:
+        lines.append(f"- **files written**: {', '.join('`'+f+'`' for f in beh.files_written)}")
+    if beh.files_deleted:
+        lines.append(f"- **files deleted**: {', '.join('`'+f+'`' for f in beh.files_deleted)}")
+    if beh.network:
+        lines.append(f"- **network**: {', '.join('`'+n+'`' for n in beh.network)}")
+    if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted, beh.network]):
+        lines.append("- No significant action observed.")
+    lines.append("")
+
+    lines.append("## 4. Static capabilities & hints\n")
+    if caps.interesting_strings:
+        lines.append("Notable strings:\n")
+        for s in caps.interesting_strings:
+            lines.append(f"- `{s}`")
+    lines.append(f"\n- capa: {'available' if caps.tools_available.get('capa') else 'not installed'}")
+    lines.append(f"- floss: {'available' if caps.tools_available.get('floss') else 'not installed'}\n")
+
+    lines.append("## 5. Analyst synthesis\n")
+    for b in result.synthesis:
+        lines.append(f"- {b}")
+    lines.append("")
+    return "\n".join(lines)
