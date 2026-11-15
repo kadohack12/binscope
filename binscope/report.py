@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from typing import List
+from typing import List, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -37,6 +37,11 @@ def build_synthesis(result: AnalysisResult) -> List[str]:
     idn = result.identity
     if idn.format == "PE":
         return _build_synthesis_pe(result)
+    if idn.format == "UNKNOWN":
+        return [
+            f"Unsupported file format ({idn.arch or idn.file_type or 'unknown'}), {idn.size} bytes, sha256 {idn.sha256[:16]}...",
+            "Dynamic tracing skipped because target is neither Linux ELF nor Windows PE.",
+        ]
     return _build_synthesis_elf(result)
 
 
@@ -95,8 +100,9 @@ def _build_synthesis_pe(result: AnalysisResult) -> List[str]:
         f"{idn.size} bytes, sha256 {idn.sha256[:16]}..."
     )
     if idn.packed_alert:
+        sec = f"'{idn.max_entropy_section}' " if idn.max_entropy_section else ""
         bullets.append(
-            f"Packing hint: highest section entropy {idn.max_entropy} > 7.0 - "
+            f"Packing hint: section {sec}entropy {idn.max_entropy} > 7.0 - "
             "section may be compressed/encrypted (packer or embedded payload)."
         )
 
@@ -164,16 +170,87 @@ def _behaviour_sentence(beh, pe: bool = False) -> str:
         actions.append(("shows " if pe else "prints ") + " / ".join(beh.stdout_output[:3]))
     if beh.note:
         actions.append(beh.note)
+    if not actions and beh.api_trace:
+        actions.append("called " + " -> ".join(beh.api_trace[:6]))
+    if beh.emulation_stop:
+        actions.append(f"stopped at {beh.emulation_stop}")
     if actions:
         return "Observed actions: " + "; ".join(actions) + "."
     return "No child process, file write, network or notable output observed."
+
+
+def build_next_steps(result: AnalysisResult) -> List[str]:
+    """Actionable next steps tailored to the binary profile (beginner & expert)."""
+    idn = result.identity
+    stim = result.stimuli
+    beh = result.behavior
+    caps = result.capabilities
+    steps: List[str] = []
+
+    if idn.format == "UNKNOWN":
+        return ["Pass a Linux ELF binary or a Windows PE (.exe/.dll) file."]
+
+    if idn.format == "PE":
+        if idn.packed_alert:
+            sec = f"'{idn.max_entropy_section}'" if idn.max_entropy_section else "one section"
+            steps.append(
+                f"High entropy in {sec} ({idn.max_entropy}): inspect whether it holds encrypted data/payload or is packed."
+            )
+        if beh.emulation_stop and "unsupported_api" in beh.emulation_stop:
+            steps.append(
+                f"Emulation paused at {beh.emulation_stop}; inspect that caller address or cross-references to notable strings in Ghidra/x32dbg."
+            )
+        elif idn.subsystem == "GUI" and not (beh.execve or beh.files_written or beh.network):
+            steps.append(
+                "Windows GUI binary: interactive window/mouse events require static inspection (Ghidra/x32dbg) or a Windows VM."
+            )
+    else:
+        if stim.missing_files and not (beh.execve or beh.network):
+            steps.append("Missing file check detected: re-run with `--auto-stub` inside a sandbox to see stage two.")
+        if stim.exit_code_changes or stim.output_changes:
+            steps.append("Input triggers found above: test those exact arguments/stdin values directly to verify the unlocked path.")
+        elif not any([stim.argv, stim.env_vars, stim.comparisons, stim.numeric_probes, stim.stdin_expected]):
+            steps.append("No simple CLI/stdin trigger found: check imported functions or open in Ghidra/radare2/gdb.")
+
+    if beh.execve or beh.network or beh.files_written:
+        steps.append("Active process/file/network behaviour seen: handle and run this sample only inside an offline sandbox.")
+
+    if not caps.tools_available.get("capa") or not caps.tools_available.get("floss"):
+        steps.append("Tip: run inside the BlackArch lab (with capa & floss) for deeper MITRE capabilities and decoded strings.")
+
+    return steps[:3]
+
+
+def build_explanations(result: AnalysisResult) -> List[Tuple[str, str]]:
+    """Plain-language glossary tailored to what appeared in this specific binary."""
+    idn = result.identity
+    prot = result.protections
+    items: List[Tuple[str, str]] = []
+
+    if idn.format == "PE":
+        items.append(("PE32 / Subsystem", f"Windows executable ({idn.subsystem or 'unknown'} mode). GUI binaries wait for window/mouse events; Console binaries run in a terminal."))
+        if idn.packed_alert:
+            items.append(("Entropy > 7.0", "Measures randomness (0-8). Normal code is ~5-6; >7.0 usually means compressed/encrypted data or a packed binary."))
+        if prot.aslr is not None:
+            items.append(("ASLR / DEP", "ASLR randomizes memory addresses; DEP/NX prevents executing data as code (harder to exploit)."))
+        items.append(("Speakeasy", "Safe CPU/Windows API emulator in Python: simulates execution without touching your real Linux/Windows system."))
+    else:
+        if idn.stripped is True:
+            items.append(("Stripped = Yes", "Function and variable names were removed to make reverse engineering harder."))
+        elif idn.stripped is False:
+            items.append(("Stripped = No", "Debug/symbol names are still present, making disassembly much easier to read."))
+        if prot.pie is not None or prot.nx is not None:
+            items.append(("PIE / NX / Canary", "PIE randomizes code addresses; NX blocks shellcode on stack/heap; Canary detects stack buffer overflows."))
+        items.append(("strace / ltrace", "strace records Linux kernel syscalls (files, network, execve); ltrace records library calls (strcmp, strtoul, getenv)."))
+
+    return items
 
 
 # --------------------------------------------------------------------------- #
 # Terminal rendering
 # --------------------------------------------------------------------------- #
 
-def render_console(result: AnalysisResult, console: Console | None = None) -> None:
+def render_console(result: AnalysisResult, console: Console | None = None, explain: bool = False) -> None:
     console = console or Console()
     idn = result.identity
     prot = result.protections
@@ -194,10 +271,13 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         t.add_row("Arch", f"{idn.bits}-bit {idn.arch}" if idn.bits else idn.arch)
         t.add_row("Type", idn.elf_type or "PE")
         t.add_row("Subsystem", idn.subsystem or "-")
-        t.add_row("Sections", f"{idn.sections} (max entropy {idn.max_entropy}"
-                  + (" - [red]possibly packed[/red])" if idn.packed_alert else ")"))
+        sec_lbl = f"{idn.max_entropy_section}=" if idn.max_entropy_section else "max entropy "
+        t.add_row("Sections", f"{idn.sections} ({sec_lbl}{idn.max_entropy}"
+                  + (" - [red]possibly packed/encrypted[/red])" if idn.packed_alert else ")"))
         t.add_row("Timestamp", idn.timestamp or "-")
         t.add_row("PDB path", idn.pdb_path or "-")
+    elif idn.format == "UNKNOWN":
+        t.add_row("Format", f"Unsupported ({idn.arch or idn.file_type or 'non-binary'})")
     else:
         t.add_row("Arch", f"{idn.bits}-bit {idn.arch} ({idn.endianness} endian)" if idn.bits else f"{idn.arch} ({idn.endianness} endian)")
         t.add_row("Type", idn.elf_type)
@@ -288,10 +368,15 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         bt.add_row("stderr", "\n".join(beh.stderr_output))
     if beh.exit_codes:
         bt.add_row("exit codes", "\n".join(beh.exit_codes))
+    if beh.api_trace:
+        bt.add_row("API trace", " -> ".join(beh.api_trace[:20]))
+    if beh.emulation_stop:
+        bt.add_row("emulation stop", beh.emulation_stop)
     if beh.note:
         bt.add_row("registry", beh.note)
     if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted,
-                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes, beh.note]):
+                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes,
+                beh.api_trace, beh.emulation_stop, beh.note]):
         bt.add_row("-", "no significant action observed")
     console.print(Panel(bt, title="[bold]3. Behaviour - what it really does[/bold]", border_style="green"))
 
@@ -320,12 +405,26 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         ct.add_row("note", caps.note)
     console.print(Panel(ct, title="[bold]4. Static capabilities & hints[/bold]", border_style="yellow"))
 
-    # 5. Synthesis
+    # 5. Synthesis + Next steps
     syn = Text()
     for b in result.synthesis:
         syn.append("- ", style="bold")
         syn.append(b + "\n")
+    steps = build_next_steps(result)
+    if steps:
+        syn.append("\nNext steps:\n", style="bold cyan")
+        for s in steps:
+            syn.append("  -> ", style="cyan")
+            syn.append(s + "\n")
     console.print(Panel(syn, title="[bold]5. Analyst synthesis[/bold]", border_style="bright_blue"))
+
+    if explain:
+        et = Table(show_header=False, box=None, pad_edge=False)
+        et.add_column(style="bold magenta", no_wrap=True)
+        et.add_column()
+        for term, desc in build_explanations(result):
+            et.add_row(term, desc)
+        console.print(Panel(et, title="[bold]6. Beginner guide (--explain)[/bold]", border_style="magenta"))
 
     if result.warnings:
         for w in result.warnings:
@@ -355,8 +454,9 @@ def to_markdown(result: AnalysisResult) -> str:
         lines.append(f"- **Arch**: {idn.arch} ({idn.bits}-bit)")
         lines.append(f"- **Type**: {idn.elf_type}")
         lines.append(f"- **Subsystem**: {idn.subsystem or '-'}")
-        lines.append(f"- **Sections**: {idn.sections} (max entropy {idn.max_entropy}"
-                     + (" - **possibly packed**)" if idn.packed_alert else ")"))
+        sec_lbl = f"{idn.max_entropy_section}=" if idn.max_entropy_section else "max entropy "
+        lines.append(f"- **Sections**: {idn.sections} ({sec_lbl}{idn.max_entropy}"
+                     + (" - **possibly packed/encrypted**)" if idn.packed_alert else ")"))
         lines.append(f"- **Timestamp**: {idn.timestamp or '-'}")
         lines.append(f"- **PDB path**: `{idn.pdb_path or '-'}`")
     else:
@@ -439,10 +539,15 @@ def to_markdown(result: AnalysisResult) -> str:
             lines.append(f"  - `{s}`")
     if beh.exit_codes:
         lines.append(f"- **exit codes**: {', '.join('`'+e+'`' for e in beh.exit_codes)}")
+    if beh.api_trace:
+        lines.append("- **API trace**: " + " -> ".join(f"`{a}`" for a in beh.api_trace[:20]))
+    if beh.emulation_stop:
+        lines.append(f"- **emulation stop**: `{beh.emulation_stop}`")
     if beh.note:
         lines.append(f"- **registry**: {beh.note}")
     if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted,
-                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes, beh.note]):
+                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes,
+                beh.api_trace, beh.emulation_stop, beh.note]):
         lines.append("- No significant action observed.")
     lines.append("")
 
@@ -477,5 +582,10 @@ def to_markdown(result: AnalysisResult) -> str:
     lines.append("## 5. Analyst synthesis\n")
     for b in result.synthesis:
         lines.append(f"- {b}")
+    steps = build_next_steps(result)
+    if steps:
+        lines.append("\n### Next steps\n")
+        for s in steps:
+            lines.append(f"- {s}")
     lines.append("")
     return "\n".join(lines)

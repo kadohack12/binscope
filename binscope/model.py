@@ -23,6 +23,7 @@ class Identity:
     subsystem: str = ""
     sections: int = 0
     max_entropy: float = 0.0
+    max_entropy_section: str = ""
     packed_alert: bool = False
     timestamp: str = ""
     pdb_path: str = ""
@@ -78,6 +79,8 @@ class Behavior:
     stdout_output: List[str] = field(default_factory=list)
     stderr_output: List[str] = field(default_factory=list)
     exit_codes: List[str] = field(default_factory=list)
+    api_trace: List[str] = field(default_factory=list)
+    emulation_stop: str = ""
     note: str = ""
 
 @dataclass

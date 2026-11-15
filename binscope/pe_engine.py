@@ -36,7 +36,10 @@ except Exception:  # pragma: no cover
     pefile = None
 
 try:  # pragma: no cover
-    import speakeasy
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore", message=".*pkg_resources.*")
+        import speakeasy
     _SPEAKEASY_IMPORT_ERROR: Optional[Exception] = None
 except ModuleNotFoundError as _speakeasy_exc:  # pragma: no cover
     # Genuinely not installed: the module (or a required dependency) is absent.
@@ -345,11 +348,14 @@ def analyze_pe_identity(path: str) -> Identity:
         entropies = []
         for s in sections:
             try:
-                entropies.append(s.get_entropy())
+                sec_name = s.Name.decode("latin1", "replace").rstrip("\x00") or "?"
+                entropies.append((s.get_entropy(), sec_name))
             except Exception:
                 pass
         if entropies:
-            ident.max_entropy = round(max(entropies), 2)
+            max_ent, max_sec = max(entropies, key=lambda x: x[0])
+            ident.max_entropy = round(max_ent, 2)
+            ident.max_entropy_section = max_sec
             ident.packed_alert = ident.max_entropy > _ENTROPY_ALERT
 
         ident.pdb_path = _pe_pdb_path(pe)
@@ -627,8 +633,22 @@ def _speakeasy_unavailable_message() -> str:
             "Dynamic PE emulation skipped.")
 
 
+def _format_emulation_error(err) -> str:
+    if not isinstance(err, dict):
+        return str(err)
+    etype = err.get("type", "error")
+    api = err.get("api_name", "")
+    caller = ""
+    stack = err.get("stack") or []
+    if stack and isinstance(stack[0], str):
+        m = re.search(r":\s*(0x[0-9a-fA-F]+)", stack[0]) or re.search(r"0x[0-9a-fA-F]+", stack[0])
+        if m:
+            caller = f" (caller {m.group(1) if m.lastindex else m.group(0)})"
+    return f"{etype}: {api}{caller}" if api else f"{etype}{caller}"
+
+
 def _emulate(path: str, command_line: str, env: Dict[str, str],
-             timeout: float) -> Tuple[List[dict], Optional[str]]:
+             timeout: float, meta: Optional[dict] = None) -> Tuple[List[dict], Optional[str]]:
     """Run one emulation pass; return the list of recorded API calls."""
     if speakeasy is None:
         return [], _speakeasy_unavailable_message()
@@ -641,9 +661,14 @@ def _emulate(path: str, command_line: str, env: Dict[str, str],
         return [], f"{type(exc).__name__}: {exc}"
 
     apis: List[dict] = []
+    stop_reason = ""
     for ep in report.get("entry_points", []):
         for call in ep.get("apis", []):
             apis.append(call)
+        if not stop_reason and ep.get("error"):
+            stop_reason = _format_emulation_error(ep["error"])
+    if meta is not None and stop_reason:
+        meta["stop_reason"] = stop_reason
     return apis, None
 
 
@@ -671,14 +696,20 @@ def run_pe_emulation(
 
     # -- Pass 1: baseline, to discover consulted env vars ----------------- #
     acc = _PeBehaviorAccumulator()
-    baseline_apis, err = _emulate(path, name, {}, timeout)
+    meta: dict = {}
+    baseline_apis, err = _emulate(path, name, {}, timeout, meta=meta)
     discovered_env: List[str] = []
     if err and "not installed" not in err:
         warnings.append(f"emulation (baseline) failed: {err}")
     if not err:
         runs.append(RunResult(label="baseline", argv=[], env={}))
+        if meta.get("stop_reason"):
+            behavior.emulation_stop = meta["stop_reason"]
         for call in baseline_apis:
-            base = _api_base(call.get("api_name", ""))
+            full_name = call.get("api_name", "")
+            base = _api_base(full_name)
+            if full_name and not _API_NOISE.match(base) and full_name not in behavior.api_trace:
+                behavior.api_trace.append(full_name)
             if "getenvironmentvariable" in base.lower():
                 for a in call.get("args", []):
                     if isinstance(a, str) and re.match(r"^[A-Za-z_]\w{0,30}$", a):

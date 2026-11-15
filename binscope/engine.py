@@ -138,6 +138,14 @@ def _net_addr(blob: str) -> str:
 _LINE_RE = re.compile(r"^(?:\[pid\s+\d+\]\s+|\d+\s+)?(\w+)\((.*)\)\s*=\s*(.*)$")
 
 
+def _decode_strace_path(s: str) -> str:
+    raw = s.encode("utf-8", "surrogateescape")
+    raw = re.sub(rb"\\([0-7]{1,3})", lambda m: bytes([int(m.group(1), 8)]), raw)
+    raw = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), raw)
+    raw = raw.replace(b'\\"', b'"').replace(b"\\\\", b"\\")
+    return raw.decode("utf-8", "replace")
+
+
 def parse_strace(text: str, target: str, workdir: str) -> dict:
     """Extract analyst-relevant syscalls from raw strace output."""
     res = {
@@ -174,9 +182,9 @@ def parse_strace(text: str, target: str, workdir: str) -> dict:
             em = re.match(r'\s*"([^"]*)"\s*,\s*\[([^\]]*)\]', args)
             if not em:
                 continue
-            path = em.group(1)
+            path = _decode_strace_path(em.group(1))
             argv = _unquote_args(em.group(2))
-            if os.path.abspath(path) == target_abs:
+            if os.path.realpath(path) == os.path.realpath(target_abs):
                 continue  # our own launch
             res["execve"].append((path, argv))
 
