@@ -18,6 +18,14 @@ class Identity:
     size: int = 0
     sha256: str = ""
     file_type: str = ""
+    # PE-specific
+    format: str = ""  # "ELF" or "PE"
+    subsystem: str = ""
+    sections: int = 0
+    max_entropy: float = 0.0
+    packed_alert: bool = False
+    timestamp: str = ""
+    pdb_path: str = ""
 
 
 @dataclass
@@ -28,6 +36,12 @@ class Protections:
     relro: Optional[str] = None
     fortify: Optional[bool] = None
     bind_now: Optional[bool] = None
+    # PE-specific
+    aslr: Optional[bool] = None
+    dep: Optional[bool] = None
+    cfg: Optional[bool] = None
+    safeseh: Optional[bool] = None
+    high_entropy_va: Optional[bool] = None
 
 
 @dataclass
@@ -47,6 +61,9 @@ class Stimuli:
     output_changes: List[str] = field(default_factory=list)
     help_text: str = ""
     note: str = ""
+    # PE-specific (emulation)
+    input_apis: List[str] = field(default_factory=list)
+    trigger_notes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -73,6 +90,10 @@ class Capabilities:
     floss: Optional[List[str]] = None
     tools_available: Dict[str, bool] = field(default_factory=dict)
     note: str = ""
+    # PE-specific
+    dlls: List[str] = field(default_factory=list)
+    api_categories: Dict[str, List[str]] = field(default_factory=dict)
+    unicode_strings: List[str] = field(default_factory=list)
 
 
 @dataclass

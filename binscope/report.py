@@ -35,6 +35,13 @@ def _prot_style(ok, good: bool = True) -> str:
 def build_synthesis(result: AnalysisResult) -> List[str]:
     """Produce 3-5 plain-language bullet points describing the binary."""
     idn = result.identity
+    if idn.format == "PE":
+        return _build_synthesis_pe(result)
+    return _build_synthesis_elf(result)
+
+
+def _build_synthesis_elf(result: AnalysisResult) -> List[str]:
+    idn = result.identity
     prot = result.protections
     stim = result.stimuli
     beh = result.behavior
@@ -57,14 +64,75 @@ def build_synthesis(result: AnalysisResult) -> List[str]:
     prot_txt = ", ".join(f"{name}: {'on' if v else 'off'}" for name, v in prot_bits if v is not None)
     bullets.append("Protections: " + (prot_txt or "none detected") + ".")
 
-    # Inputs
+    bullets.append(_stimuli_sentence(stim))
+    bullets.append(_behaviour_sentence(beh))
+
+    hints = []
+    if caps.interesting_strings:
+        hints.append("notable strings: " + ", ".join(caps.interesting_strings[:5]))
+    if caps.capa:
+        hints.append(f"capa: {caps.capa.get('count', 0)} rule(s) matched")
+    if caps.floss:
+        hints.append(f"floss: {len(caps.floss)} decoded string(s)")
+    if hints:
+        bullets.append("Static hints: " + "; ".join(hints) + ".")
+
+    return bullets[:5]
+
+
+def _build_synthesis_pe(result: AnalysisResult) -> List[str]:
+    idn = result.identity
+    prot = result.protections
+    stim = result.stimuli
+    beh = result.behavior
+    caps = result.capabilities
+    bullets: List[str] = []
+
+    bits = f"{idn.bits}-bit" if idn.bits else ""
+    bullets.append(
+        f"Windows PE ({idn.elf_type or 'PE'}) {bits} {idn.arch or '?'} "
+        f"{idn.subsystem or ''} binary, {idn.sections} section(s), "
+        f"{idn.size} bytes, sha256 {idn.sha256[:16]}..."
+    )
+    if idn.packed_alert:
+        bullets.append(
+            f"Packing hint: highest section entropy {idn.max_entropy} > 7.0 - "
+            "section may be compressed/encrypted (packer or embedded payload)."
+        )
+
+    prot_bits = [("ASLR", prot.aslr), ("DEP", prot.dep), ("CFG", prot.cfg),
+                 ("SafeSEH", prot.safeseh), ("HighEntropyVA", prot.high_entropy_va)]
+    prot_txt = ", ".join(f"{n}: {'on' if v else 'off'}" for n, v in prot_bits if v is not None)
+    bullets.append("Protections: " + (prot_txt or "none detected") + ".")
+
+    bullets.append(_stimuli_sentence(stim, pe=True))
+    bullets.append(_behaviour_sentence(beh, pe=True))
+
+    hints = []
+    if caps.dlls:
+        hints.append("DLLs: " + ", ".join(caps.dlls[:6]))
+    if caps.api_categories:
+        hints.append("API families: " + ", ".join(caps.api_categories.keys()))
+    if caps.interesting_strings:
+        hints.append("notable strings: " + ", ".join(caps.interesting_strings[:4]))
+    if hints:
+        bullets.append("Static hints: " + "; ".join(hints) + ".")
+
+    return bullets[:6]
+
+
+def _stimuli_sentence(stim, pe: bool = False) -> str:
     inputs = []
     if stim.argv:
         inputs.append("argv " + ", ".join(f"'{a}'" for a in stim.argv[:6]))
     if stim.env_vars:
         inputs.append("env " + ", ".join(stim.env_vars[:6]))
+    if pe and stim.input_apis:
+        inputs.append("input APIs " + ", ".join(stim.input_apis[:6]))
     if stim.missing_files:
         inputs.append("expected files " + ", ".join(stim.missing_files[:5]))
+    if stim.files and not pe:
+        inputs.append("files checked " + ", ".join(stim.files[:5]))
     if stim.comparisons:
         inputs.append("string checks " + ", ".join(f"'{c}'" for c in stim.comparisons[:5]))
     if stim.numeric_probes:
@@ -72,15 +140,15 @@ def build_synthesis(result: AnalysisResult) -> List[str]:
     if stim.argc_expected is not None:
         inputs.append(f"~{stim.argc_expected} argument(s)")
     if stim.exit_code_changes:
-        inputs.append("exit-code change " + ", ".join(stim.exit_code_changes[:3]))
+        inputs.append("behaviour change " + ", ".join(stim.exit_code_changes[:3]))
     if stim.stdin_expected:
         inputs.append("stdin")
     if inputs:
-        bullets.append("Waits for / reacts to: " + "; ".join(inputs) + ".")
-    else:
-        bullets.append("No specific external input was observed to change behaviour.")
+        return "Waits for / reacts to: " + "; ".join(inputs) + "."
+    return "No specific external input was observed to change behaviour."
 
-    # Behaviour
+
+def _behaviour_sentence(beh, pe: bool = False) -> str:
     actions = []
     if beh.execve:
         actions.append("spawns " + "; ".join(beh.execve[:4]))
@@ -93,24 +161,12 @@ def build_synthesis(result: AnalysisResult) -> List[str]:
     if beh.network:
         actions.append("network " + ", ".join(beh.network[:4]))
     if beh.stdout_output:
-        actions.append("prints " + " / ".join(beh.stdout_output[:3]))
+        actions.append(("shows " if pe else "prints ") + " / ".join(beh.stdout_output[:3]))
+    if beh.note:
+        actions.append(beh.note)
     if actions:
-        bullets.append("Observed actions: " + "; ".join(actions) + ".")
-    else:
-        bullets.append("No child process, file write, network or notable output observed.")
-
-    # Static hints
-    hints = []
-    if caps.interesting_strings:
-        hints.append("notable strings: " + ", ".join(caps.interesting_strings[:5]))
-    if caps.capa:
-        hints.append(f"capa: {caps.capa.get('count', 0)} rule(s) matched")
-    if caps.floss:
-        hints.append(f"floss: {len(caps.floss)} decoded string(s)")
-    if hints:
-        bullets.append("Static hints: " + "; ".join(hints) + ".")
-
-    return bullets[:5]
+        return "Observed actions: " + "; ".join(actions) + "."
+    return "No child process, file write, network or notable output observed."
 
 
 # --------------------------------------------------------------------------- #
@@ -125,17 +181,28 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
     beh = result.behavior
     caps = result.capabilities
 
-    console.rule("[bold cyan]binscope[/bold cyan] - rapid ELF triage")
+    console.rule("[bold cyan]binscope[/bold cyan] - rapid binary triage")
+
+    is_pe = idn.format == "PE"
 
     # 1. Identity
     t = Table(show_header=False, box=None, pad_edge=False)
     t.add_column(style="bold")
     t.add_column()
     t.add_row("Path", idn.path)
-    t.add_row("Arch", f"{idn.bits}-bit {idn.arch} ({idn.endianness} endian)" if idn.bits else f"{idn.arch} ({idn.endianness} endian)")
-    t.add_row("Type", idn.elf_type)
-    t.add_row("Interp", idn.interp or "-")
-    t.add_row("Stripped", _yn(idn.stripped) if idn.stripped is not None else "?")
+    if is_pe:
+        t.add_row("Arch", f"{idn.bits}-bit {idn.arch}" if idn.bits else idn.arch)
+        t.add_row("Type", idn.elf_type or "PE")
+        t.add_row("Subsystem", idn.subsystem or "-")
+        t.add_row("Sections", f"{idn.sections} (max entropy {idn.max_entropy}"
+                  + (" - [red]possibly packed[/red])" if idn.packed_alert else ")"))
+        t.add_row("Timestamp", idn.timestamp or "-")
+        t.add_row("PDB path", idn.pdb_path or "-")
+    else:
+        t.add_row("Arch", f"{idn.bits}-bit {idn.arch} ({idn.endianness} endian)" if idn.bits else f"{idn.arch} ({idn.endianness} endian)")
+        t.add_row("Type", idn.elf_type)
+        t.add_row("Interp", idn.interp or "-")
+        t.add_row("Stripped", _yn(idn.stripped) if idn.stripped is not None else "?")
     t.add_row("Size", f"{idn.size} bytes")
     t.add_row("SHA256", idn.sha256)
     console.print(Panel(t, title="[bold]1. Identity[/bold]", border_style="cyan"))
@@ -143,12 +210,21 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
     pt = Table(show_header=False, box=None, pad_edge=False)
     pt.add_column(style="bold")
     pt.add_column()
-    pt.add_row("PIE", _yn(prot.pie))
-    pt.add_row("NX", _yn(prot.nx))
-    pt.add_row("Canary", _yn(prot.canary))
-    pt.add_row("RELRO", prot.relro or "?")
-    pt.add_row("FORTIFY", _yn(prot.fortify))
-    console.print(Panel(pt, title="[bold]Protections (checksec)[/bold]", border_style="cyan"))
+    if is_pe:
+        pt.add_row("ASLR", _yn(prot.aslr))
+        pt.add_row("DEP / NX", _yn(prot.dep))
+        pt.add_row("CFG", _yn(prot.cfg))
+        pt.add_row("SafeSEH", _yn(prot.safeseh))
+        pt.add_row("HighEntropyVA", _yn(prot.high_entropy_va))
+        title = "Protections (DllCharacteristics)"
+    else:
+        pt.add_row("PIE", _yn(prot.pie))
+        pt.add_row("NX", _yn(prot.nx))
+        pt.add_row("Canary", _yn(prot.canary))
+        pt.add_row("RELRO", prot.relro or "?")
+        pt.add_row("FORTIFY", _yn(prot.fortify))
+        title = "Protections (checksec)"
+    console.print(Panel(pt, title=f"[bold]{title}[/bold]", border_style="cyan"))
 
     # 2. Stimuli
     st = Table(show_header=True, box=None, header_style="bold magenta")
@@ -168,15 +244,21 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         st.add_row("numeric input", ", ".join(stim.numeric_probes))
     if stim.argc_expected is not None:
         st.add_row("argc", f"expects ~{stim.argc_expected} argument(s)")
+    if stim.input_apis:
+        st.add_row("input APIs", ", ".join(stim.input_apis))
+    if stim.trigger_notes:
+        st.add_row("behaviour change", "\n".join(stim.trigger_notes))
     if stim.exit_code_changes:
         st.add_row("exit code trigger", "\n".join(stim.exit_code_changes))
     if stim.output_changes:
         st.add_row("output trigger", "\n".join(stim.output_changes))
     if stim.stdin_expected:
         st.add_row("stdin", "expected" + (f" ({', '.join(stim.stdin_patterns)})" if stim.stdin_patterns else ""))
+    if stim.note:
+        st.add_row("note", stim.note)
     if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons,
                 stim.numeric_probes, stim.exit_code_changes, stim.output_changes,
-                stim.argc_expected is not None, stim.stdin_expected]):
+                stim.input_apis, stim.argc_expected is not None, stim.stdin_expected]):
         st.add_row("-", "no specific stimulus detected")
     body = st
     if stim.help_text:
@@ -206,8 +288,10 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
         bt.add_row("stderr", "\n".join(beh.stderr_output))
     if beh.exit_codes:
         bt.add_row("exit codes", "\n".join(beh.exit_codes))
+    if beh.note:
+        bt.add_row("registry", beh.note)
     if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted,
-                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes]):
+                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes, beh.note]):
         bt.add_row("-", "no significant action observed")
     console.print(Panel(bt, title="[bold]3. Behaviour - what it really does[/bold]", border_style="green"))
 
@@ -215,10 +299,17 @@ def render_console(result: AnalysisResult, console: Console | None = None) -> No
     ct = Table(show_header=False, box=None)
     ct.add_column(style="bold")
     ct.add_column()
-    if caps.imports:
+    if caps.dlls:
+        ct.add_row("DLLs", ", ".join(caps.dlls))
+    if caps.api_categories:
+        cat_lines = [f"{cat}: {', '.join(apis)}" for cat, apis in caps.api_categories.items()]
+        ct.add_row("APIs by category", "\n".join(cat_lines))
+    if caps.imports and not caps.api_categories:
         ct.add_row("imports", ", ".join(caps.imports))
     if caps.strings_summary:
         ct.add_row("strings summary", "\n".join(caps.strings_summary))
+    if caps.unicode_strings:
+        ct.add_row("UTF-16 strings", "\n".join(caps.unicode_strings[:15]))
     if caps.interesting_strings:
         ct.add_row("notable strings", "\n".join(caps.interesting_strings))
     ct.add_row("capa", "available" if caps.tools_available.get("capa") else "not installed")
@@ -258,18 +349,34 @@ def to_markdown(result: AnalysisResult) -> str:
     lines.append("# binscope report\n")
     lines.append("## 1. Identity\n")
     lines.append(f"- **Path**: `{idn.path}`")
-    lines.append(f"- **Arch**: {idn.bits} {idn.arch} ({idn.endianness} endian)")
-    lines.append(f"- **Type**: {idn.elf_type}")
-    lines.append(f"- **Interpreter**: {idn.interp or '-'}")
-    lines.append(f"- **Stripped**: {'Yes' if idn.stripped else 'No' if idn.stripped is not None else '?'}")
+    if idn.format == "PE":
+        lines.append(f"- **Arch**: {idn.arch} ({idn.bits}-bit)")
+        lines.append(f"- **Type**: {idn.elf_type}")
+        lines.append(f"- **Subsystem**: {idn.subsystem or '-'}")
+        lines.append(f"- **Sections**: {idn.sections} (max entropy {idn.max_entropy}"
+                     + (" - **possibly packed**)" if idn.packed_alert else ")"))
+        lines.append(f"- **Timestamp**: {idn.timestamp or '-'}")
+        lines.append(f"- **PDB path**: `{idn.pdb_path or '-'}`")
+    else:
+        lines.append(f"- **Arch**: {idn.bits} {idn.arch} ({idn.endianness} endian)")
+        lines.append(f"- **Type**: {idn.elf_type}")
+        lines.append(f"- **Interpreter**: {idn.interp or '-'}")
+        lines.append(f"- **Stripped**: {'Yes' if idn.stripped else 'No' if idn.stripped is not None else '?'}")
     lines.append(f"- **Size**: {idn.size} bytes")
     lines.append(f"- **SHA256**: `{idn.sha256}`\n")
     lines.append("### Protections\n")
-    lines.append(f"- PIE: {_yn(prot.pie)}")
-    lines.append(f"- NX: {_yn(prot.nx)}")
-    lines.append(f"- Canary: {_yn(prot.canary)}")
-    lines.append(f"- RELRO: {prot.relro or '?'}")
-    lines.append(f"- FORTIFY: {_yn(prot.fortify)}\n")
+    if idn.format == "PE":
+        lines.append(f"- ASLR: {_yn(prot.aslr)}")
+        lines.append(f"- DEP/NX: {_yn(prot.dep)}")
+        lines.append(f"- CFG: {_yn(prot.cfg)}")
+        lines.append(f"- SafeSEH: {_yn(prot.safeseh)}")
+        lines.append(f"- HighEntropyVA: {_yn(prot.high_entropy_va)}\n")
+    else:
+        lines.append(f"- PIE: {_yn(prot.pie)}")
+        lines.append(f"- NX: {_yn(prot.nx)}")
+        lines.append(f"- Canary: {_yn(prot.canary)}")
+        lines.append(f"- RELRO: {prot.relro or '?'}")
+        lines.append(f"- FORTIFY: {_yn(prot.fortify)}\n")
 
     lines.append("## 2. Stimuli - what it expects\n")
     if stim.argv:
@@ -282,10 +389,14 @@ def to_markdown(result: AnalysisResult) -> str:
         lines.append(f"- **missing files**: {', '.join('`'+f+'`' for f in stim.missing_files)}")
     if stim.comparisons:
         lines.append(f"- **string comparisons**: {', '.join('`'+c+'`' for c in stim.comparisons)}")
+    if stim.input_apis:
+        lines.append(f"- **input APIs**: {', '.join('`'+a+'`' for a in stim.input_apis)}")
     if stim.numeric_probes:
         lines.append(f"- **numeric input**: {', '.join('`'+n+'`' for n in stim.numeric_probes)}")
     if stim.argc_expected is not None:
         lines.append(f"- **argc**: expects ~{stim.argc_expected} argument(s)")
+    if stim.trigger_notes:
+        lines.append("- **behaviour change**: " + "; ".join(f"`{c}`" for c in stim.trigger_notes))
     if stim.exit_code_changes:
         lines.append("- **exit code trigger**: " + "; ".join(f"`{c}`" for c in stim.exit_code_changes))
     if stim.output_changes:
@@ -294,8 +405,10 @@ def to_markdown(result: AnalysisResult) -> str:
         lines.append("- **stdin**: expected")
     if not any([stim.argv, stim.env_vars, stim.files, stim.missing_files, stim.comparisons,
                 stim.numeric_probes, stim.exit_code_changes, stim.output_changes,
-                stim.argc_expected is not None, stim.stdin_expected]):
+                stim.input_apis, stim.argc_expected is not None, stim.stdin_expected]):
         lines.append("- No specific stimulus detected.")
+    if stim.note:
+        lines.append(f"- **note**: {stim.note}")
     if stim.help_text:
         lines.append("\n### Help output\n")
         lines.append("```\n" + stim.help_text + "\n```")
@@ -324,17 +437,29 @@ def to_markdown(result: AnalysisResult) -> str:
             lines.append(f"  - `{s}`")
     if beh.exit_codes:
         lines.append(f"- **exit codes**: {', '.join('`'+e+'`' for e in beh.exit_codes)}")
+    if beh.note:
+        lines.append(f"- **registry**: {beh.note}")
     if not any([beh.execve, beh.files_read, beh.files_written, beh.files_deleted,
-                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes]):
+                beh.network, beh.stdout_output, beh.stderr_output, beh.exit_codes, beh.note]):
         lines.append("- No significant action observed.")
     lines.append("")
 
     lines.append("## 4. Static capabilities & hints\n")
-    if caps.imports:
+    if caps.dlls:
+        lines.append(f"- **DLLs**: {', '.join('`'+d+'`' for d in caps.dlls)}")
+    if caps.api_categories:
+        lines.append("- **APIs by category**:")
+        for cat, apis in caps.api_categories.items():
+            lines.append(f"  - **{cat}**: {', '.join('`'+a+'`' for a in apis)}")
+    if caps.imports and not caps.api_categories:
         lines.append(f"- **imports**: {', '.join('`'+i+'`' for i in caps.imports)}")
     if caps.strings_summary:
         lines.append("- **strings summary**:")
         for s in caps.strings_summary:
+            lines.append(f"  - `{s}`")
+    if caps.unicode_strings:
+        lines.append("- **UTF-16 strings**:")
+        for s in caps.unicode_strings[:15]:
             lines.append(f"  - `{s}`")
     if caps.interesting_strings:
         lines.append("Notable strings:\n")

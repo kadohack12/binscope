@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import struct
 import sys
 
 from rich.console import Console
@@ -13,6 +14,25 @@ from .engine import run_stimulation
 from .model import AnalysisResult
 from .report import build_synthesis, render_console, to_json, to_markdown
 from .static import analyze_capabilities, analyze_identity, analyze_protections
+
+
+def detect_format(path: str) -> str:
+    """Sniff the container format from magic bytes: 'ELF', 'PE' or ''."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+            if head == b"\x7fELF":
+                return "ELF"
+            if head[:2] == b"MZ":
+                # PE files carry a 'PE\\x00\\x00' signature at e_lfanew.
+                fh.seek(0x3C)
+                off = struct.unpack("<I", fh.read(4))[0]
+                fh.seek(off)
+                if fh.read(4) == b"PE\x00\x00":
+                    return "PE"
+    except (OSError, struct.error):
+        return ""
+    return ""
 
 
 def analyze(path: str, auto_stub: bool = False, timeout: float = 2.0) -> AnalysisResult:
@@ -25,19 +45,47 @@ def analyze(path: str, auto_stub: bool = False, timeout: float = 2.0) -> Analysi
         result.warnings.append(f"Target is not a regular file: {path}")
         return result
 
+    fmt = detect_format(path)
+
+    if fmt == "PE":
+        _analyze_pe(path, result, timeout)
+    else:
+        _analyze_elf(path, result, auto_stub, timeout, fmt)
+
+    result.synthesis = build_synthesis(result)
+    return result
+
+
+def _analyze_pe(path: str, result: AnalysisResult, timeout: float) -> None:
+    from . import pe_engine
+
+    result.identity = pe_engine.analyze_pe_identity(path)
+    result.protections = pe_engine.analyze_pe_protections(path)
+    result.capabilities = pe_engine.analyze_pe_capabilities(path)
+
+    runs, stimuli, behavior, warnings = pe_engine.run_pe_emulation(
+        path,
+        static_strings=result.capabilities.interesting_strings,
+        timeout=max(timeout, 4.0),
+    )
+    result.runs = runs
+    result.stimuli = stimuli
+    result.behavior = behavior
+    result.warnings.extend(warnings)
+
+
+def _analyze_elf(path: str, result: AnalysisResult, auto_stub: bool,
+                 timeout: float, fmt: str) -> None:
     result.identity = analyze_identity(path)
+    result.identity.format = "ELF"
     result.protections = analyze_protections(path)
     result.capabilities = analyze_capabilities(path)
 
-    try:
-        with open(path, "rb") as fh:
-            is_elf = fh.read(4) == b"\x7fELF"
-    except OSError:
-        is_elf = False
-    if not is_elf:
-        result.warnings.append(f"{path} does not look like an ELF binary; dynamic analysis skipped.")
-        result.synthesis = build_synthesis(result)
-        return result
+    if fmt != "ELF":
+        result.warnings.append(
+            f"{path} does not look like an ELF or PE binary; dynamic analysis skipped."
+        )
+        return
 
     runs, stimuli, behavior, warnings = run_stimulation(
         path,
@@ -49,20 +97,18 @@ def analyze(path: str, auto_stub: bool = False, timeout: float = 2.0) -> Analysi
     result.stimuli = stimuli
     result.behavior = behavior
     result.warnings.extend(warnings)
-    result.synthesis = build_synthesis(result)
-    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="binscope",
-        description="Understand quickly what a Linux ELF binary expects and what it does.",
+        description="Understand quickly what a Linux ELF or Windows PE binary expects and what it does.",
     )
     parser.add_argument("--version", action="version", version=f"binscope {__version__}")
     sub = parser.add_subparsers(dest="command")
 
-    ap = sub.add_parser("analyze", help="analyze an ELF binary")
-    ap.add_argument("target", help="path to the ELF binary")
+    ap = sub.add_parser("analyze", help="analyze an ELF or PE binary")
+    ap.add_argument("target", help="path to the ELF or PE binary")
     ap.add_argument("--json", dest="json_out", metavar="FILE", help="write a JSON report to FILE ('-' for stdout)")
     ap.add_argument("--md", dest="md_out", metavar="FILE", help="write a Markdown report to FILE ('-' for stdout)")
     ap.add_argument("--auto-stub", action="store_true",

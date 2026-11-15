@@ -1,3 +1,3 @@
-"""binscope - rapid triage of Linux ELF binaries for malware analysts and CTF players."""
+"""binscope - rapid triage of Linux ELF and Windows PE binaries for malware analysts and CTF players."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
